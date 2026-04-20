@@ -7,17 +7,24 @@ from ta.trend import MACD, EMAIndicator
 from ta.volatility import AverageTrueRange
 
 
-def _as_series(df: pd.DataFrame, col: str) -> pd.Series:
-    """Extract *col* from *df* as a guaranteed 1-D pandas Series.
+def _as_1d_series(df: pd.DataFrame, col: str) -> pd.Series:
+    """Extract *col* from *df* as a guaranteed 1-D numeric pandas Series.
 
-    yfinance with ``threads=True`` can return a MultiIndex DataFrame whose
-    columns are tuples like ``('Close', 'AAPL')``.  Selecting ``df['Close']``
-    then yields a single-column DataFrame (shape (N, 1)) rather than a Series,
-    which blows up ``ta`` indicators that call ``pd.Series(...)`` internally.
+    Handles three yfinance column layouts:
+    1. Normal flat columns  – ``df['Close']`` is already a Series.
+    2. MultiIndex columns   – ``df['Close']`` returns a single-column DataFrame
+       (e.g. shape (N, 1)) because the real column is ``('Close', 'AAPL')``.
+    3. Already-squeezed Series from a prior flatten step.
+
+    After extraction the values are coerced to numeric and the result is
+    renamed so downstream code always sees a clean ``pd.Series`` named *col*.
     """
     s = df[col]
+    # MultiIndex selection can yield a DataFrame with one column
     if isinstance(s, pd.DataFrame):
-        s = s.squeeze(axis=1)
+        s = s.iloc[:, 0]
+    s = pd.to_numeric(s, errors="coerce")
+    s.name = col
     return s
 
 
@@ -49,9 +56,16 @@ def add_technical_features(df: pd.DataFrame) -> pd.DataFrame:
     # Flatten MultiIndex columns if present (yfinance single-ticker quirk)
     if isinstance(out.columns, pd.MultiIndex):
         out.columns = out.columns.get_level_values(0)
-    close = _as_series(out, "Close")
-    high = _as_series(out, "High")
-    low = _as_series(out, "Low")
+
+    close = _as_1d_series(out, "Close")
+    high = _as_1d_series(out, "High")
+    low = _as_1d_series(out, "Low")
+    volume = _as_1d_series(out, "Volume")
+
+    assert close.ndim == 1, f"close must be 1-D, got {close.ndim}"
+    assert high.ndim == 1, f"high must be 1-D, got {high.ndim}"
+    assert low.ndim == 1, f"low must be 1-D, got {low.ndim}"
+    assert volume.ndim == 1, f"volume must be 1-D, got {volume.ndim}"
 
     out["ret_1"] = close.pct_change()
     out["ret_5"] = close.pct_change(5)
