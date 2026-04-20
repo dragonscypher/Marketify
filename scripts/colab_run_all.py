@@ -20,6 +20,10 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 os.chdir(ROOT)
 
+
+def _is_colab() -> bool:
+    return os.environ.get("COLAB_RELEASE_TAG") is not None or Path("/content").is_dir()
+
 # Ensure subprocesses can import marketify
 _ENV = os.environ.copy()
 _ENV["PYTHONPATH"] = str(ROOT) + os.pathsep + _ENV.get("PYTHONPATH", "")
@@ -40,7 +44,7 @@ def _run(cmd: list[str], label: str) -> subprocess.CompletedProcess:
 
 
 def check_colab() -> bool:
-    from scripts.colab_check import is_colab, print_info, get_runtime_info
+    from scripts.colab_check import get_runtime_info, is_colab, print_info
     print_info()
     require = os.environ.get("MARKETIFY_REQUIRE_COLAB", "0") == "1"
     if require and not is_colab():
@@ -51,8 +55,10 @@ def check_colab() -> bool:
 
 
 def step_requirements() -> int:
-    r = _run([sys.executable, "-m", "pip", "install", "-q", "-r", "requirements.txt"],
-             "Install/check requirements")
+    # Colab gets heavy deps; local gets light deps only
+    req_file = "requirements-colab.txt" if _is_colab() else "requirements.txt"
+    r = _run([sys.executable, "-m", "pip", "install", "-q", "-r", req_file],
+             f"Install/check {req_file}")
     if r.returncode != 0:
         return r.returncode
     r2 = _run([sys.executable, "-m", "pip", "install", "-q", "-e", "."],

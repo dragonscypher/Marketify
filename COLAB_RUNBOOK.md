@@ -6,6 +6,14 @@
 - **`/content/Marketify`** = disposable Colab runtime copy (cloned from GitHub)
 - **Google Drive** = persistent storage for reports/artifacts/models
 - **Local machine** = editing + small tests only (no training/backtests)
+- **Windows local** uses `py -3.12`, not `python3`. Never use PowerShell commands inside Colab bash.
+
+## Dependency Split
+
+| File                     | Where         | Contents                                                     |
+| ------------------------ | ------------- | ------------------------------------------------------------ |
+| `requirements.txt`       | Local + Colab | Light deps (pandas, xgboost, ta, gradio, etc.)               |
+| `requirements-colab.txt` | Colab only    | `-r requirements.txt` + torch, chronos, transformers, HF hub |
 
 ## Rules
 
@@ -56,12 +64,13 @@ MARKETIFY_REQUIRE_COLAB=1 python scripts/colab_run_all.py
 ```
 
 Runs:
-1. `pip install -r requirements.txt`
+1. `pip install -r requirements-colab.txt` (heavy deps auto-installed)
 2. `pytest tests/ -q`
 3. `python scripts/validate_marketify.py`
 4. Train-if-missing pipeline
-5. Benchmark checker
-6. Generates `reports/NEXT_STATUS.md` with exact runtime info
+5. Smoke benchmark (synthetic, labelled)
+6. Real walk-forward backtest + benchmark
+7. Generates `reports/NEXT_STATUS.md` with exact runtime info
 
 ### 4. Launch Gradio UI
 
@@ -85,6 +94,22 @@ python app.py
 cat reports/NEXT_STATUS.md
 cat reports/benchmark_report.json
 ```
+
+## Local Dev (Windows)
+
+Local = editing + lightweight tests ONLY.
+
+```powershell
+# Repair venv:
+powershell -ExecutionPolicy Bypass -File scripts/repair_local_venv.ps1
+
+# Allowed commands:
+python -m py_compile marketify/some_file.py
+python -m pytest tests/ -q --tb=short
+python scripts/colab_check.py   # expect NOT Colab
+```
+
+Do NOT run `colab_run_all.py` locally. Do NOT install torch/chronos locally.
 
 ## Heavy Work Definition
 

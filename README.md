@@ -44,14 +44,21 @@ Risk warning: Trading involves risk. Losses possible. No financial advice. Any p
 Backtest/simulator time-stop now uses broker.time_stop_bars.
 No dependency on signal.time_stop_bars.
 
-## Install
+## Install (Local — Windows)
 
-1. Create or activate Python environment.
-2. Install deps.
+Local = editing + small tests only. Training/backtests/benchmarks run in Colab.
 
 ```powershell
-python -m pip install -r requirements.txt
+# First time or broken venv:
+powershell -ExecutionPolicy Bypass -File scripts/repair_local_venv.ps1
+
+# Or manual:
+py -3.12 -m venv .venv
+.venv\Scripts\Activate.ps1
+pip install -e . -r requirements.txt
 ```
+
+Only light deps installed locally. Heavy deps (torch, chronos, transformers) live in `requirements-colab.txt` and install in Colab only.
 
 ## Run UI
 
@@ -59,11 +66,14 @@ python -m pip install -r requirements.txt
 python app.py
 ```
 
-## Run Tests
+## Run Tests (Local)
 
 ```powershell
-pytest
+python -m pytest tests/ -q --tb=short
+python scripts/colab_check.py   # should print NOT Colab
 ```
+
+Do NOT run `MARKETIFY_REQUIRE_COLAB=1 python scripts/colab_run_all.py` locally.
 
 ## Notes on Notebooks
 
@@ -74,14 +84,22 @@ pytest
 
 ## Colab Workflow
 
-Heavy work (training, backtests, benchmarks, full test suite) runs in Google Colab high-RAM runtime.
+Heavy work (training, backtests, benchmarks, model sweeps) runs in Google Colab.
+Colab installs `requirements-colab.txt` (includes torch, chronos, transformers).
 
 ```bash
-# Verify Colab connection
+# In Colab:
 python scripts/colab_check.py
-
-# Run full pipeline in Colab
 MARKETIFY_REQUIRE_COLAB=1 python scripts/colab_run_all.py
 ```
 
 See [COLAB_RUNBOOK.md](COLAB_RUNBOOK.md) for full steps.
+
+## Dependency Split
+
+| File                     | Where         | What                                              |
+| ------------------------ | ------------- | ------------------------------------------------- |
+| `requirements.txt`       | Local + Colab | Light deps (pandas, xgboost, ta, gradio, etc.)    |
+| `requirements-colab.txt` | Colab only    | Heavy deps (torch, chronos, transformers, HF hub) |
+
+Project uses `ta` (pure Python), NOT `ta-lib` (C library).
