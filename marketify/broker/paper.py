@@ -429,6 +429,19 @@ class PaperBroker(BrokerBase):
             ).fetchall()
             return [dict(r) for r in rows]
 
+    def get_equity_history(self) -> list[dict[str, Any]]:
+        """Return equity snapshots as list of dicts with 'ts' and 'equity' keys."""
+        with self.lock:
+            rows = self.conn.execute(
+                "SELECT ts, equity, cash, unrealized_pnl, realized_pnl "
+                "FROM equity_history ORDER BY ts"
+            ).fetchall()
+            if rows:
+                return [dict(r) for r in rows]
+            # Fallback: single entry from current account
+            account = self.get_account()
+            return [{"ts": _utc_now(), "equity": account["equity"]}]
+
     def reset_account(self) -> None:
         """Reset paper account to initial state."""
         with self.lock:

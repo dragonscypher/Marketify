@@ -6,6 +6,21 @@ from ta.momentum import RSIIndicator
 from ta.trend import MACD, EMAIndicator
 from ta.volatility import AverageTrueRange
 
+
+def _as_series(df: pd.DataFrame, col: str) -> pd.Series:
+    """Extract *col* from *df* as a guaranteed 1-D pandas Series.
+
+    yfinance with ``threads=True`` can return a MultiIndex DataFrame whose
+    columns are tuples like ``('Close', 'AAPL')``.  Selecting ``df['Close']``
+    then yields a single-column DataFrame (shape (N, 1)) rather than a Series,
+    which blows up ``ta`` indicators that call ``pd.Series(...)`` internally.
+    """
+    s = df[col]
+    if isinstance(s, pd.DataFrame):
+        s = s.squeeze(axis=1)
+    return s
+
+
 TECHNICAL_FEATURE_COLUMNS = [
     "ret_1",
     "ret_5",
@@ -31,8 +46,12 @@ TECHNICAL_FEATURE_COLUMNS = [
 
 def add_technical_features(df: pd.DataFrame) -> pd.DataFrame:
     out = df.copy()
-    close = out["Close"]
-    high, low = out["High"], out["Low"]
+    # Flatten MultiIndex columns if present (yfinance single-ticker quirk)
+    if isinstance(out.columns, pd.MultiIndex):
+        out.columns = out.columns.get_level_values(0)
+    close = _as_series(out, "Close")
+    high = _as_series(out, "High")
+    low = _as_series(out, "Low")
 
     out["ret_1"] = close.pct_change()
     out["ret_5"] = close.pct_change(5)
