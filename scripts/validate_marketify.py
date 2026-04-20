@@ -13,7 +13,12 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-REPORTS_DIR = Path("reports")
+ROOT = Path(__file__).resolve().parent.parent
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+os.chdir(ROOT)
+
+REPORTS_DIR = ROOT / "reports"
 
 
 def _ensure_dir(path: Path) -> Path:

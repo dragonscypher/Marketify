@@ -58,10 +58,12 @@ def get_runtime_info() -> dict:
 
 def print_info() -> None:
     info = get_runtime_info()
+    root = Path(__file__).resolve().parent.parent
     print(f"executable: {info['executable']}")
     print(f"platform:   {info['platform']}")
     print(f"COLAB_TAG:  {info['colab_tag']}")
     print(f"cwd:        {info['cwd']}")
+    print(f"repo root:  {root}")
 
     if info["is_colab"]:
         print("runtime:    Google Colab ✓")
@@ -75,6 +77,12 @@ def print_info() -> None:
         print(f"System RAM: {info['system_ram_gb']} GB")
     else:
         print("System RAM: psutil not installed")
+
+    # Package file checks
+    pkg = root / "marketify"
+    data_mod = root / "marketify" / "data" / "market_data.py"
+    print(f"\nmarketify/ exists:              {pkg.is_dir()}")
+    print(f"marketify/data/market_data.py:  {data_mod.is_file()}")
 
 
 def main() -> int:

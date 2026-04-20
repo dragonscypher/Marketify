@@ -18,6 +18,11 @@ REPORTS = ROOT / "reports"
 # Allow `from scripts.colab_check import ...` when running from project root
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
+os.chdir(ROOT)
+
+# Ensure subprocesses can import marketify
+_ENV = os.environ.copy()
+_ENV["PYTHONPATH"] = str(ROOT) + os.pathsep + _ENV.get("PYTHONPATH", "")
 
 
 def _ensure_dir(p: Path) -> None:
@@ -28,7 +33,7 @@ def _run(cmd: list[str], label: str) -> subprocess.CompletedProcess:
     print(f"\n{'='*60}")
     print(f"[STEP] {label}")
     print(f"{'='*60}")
-    result = subprocess.run(cmd, cwd=str(ROOT), text=True)
+    result = subprocess.run(cmd, cwd=str(ROOT), env=_ENV, text=True)
     if result.returncode != 0:
         print(f"[WARN] {label} exited {result.returncode}")
     return result
@@ -48,7 +53,20 @@ def check_colab() -> bool:
 def step_requirements() -> int:
     r = _run([sys.executable, "-m", "pip", "install", "-q", "-r", "requirements.txt"],
              "Install/check requirements")
-    return r.returncode
+    if r.returncode != 0:
+        return r.returncode
+    r2 = _run([sys.executable, "-m", "pip", "install", "-q", "-e", "."],
+              "Install marketify in editable mode")
+    return r2.returncode
+
+
+def step_audit() -> int:
+    audit_script = ROOT / "scripts" / "audit_repo_files.py"
+    if audit_script.exists():
+        r = _run([sys.executable, str(audit_script)], "Audit repo files")
+        return r.returncode
+    print("[INFO] audit_repo_files.py not found — skipping.")
+    return 0
 
 
 def step_pytest() -> int:
@@ -183,6 +201,7 @@ def main() -> int:
 
     results = {}
     results["requirements"] = step_requirements()
+    results["audit"] = step_audit()
     results["pytest"] = step_pytest()
     results["validation"] = step_validation()
     results["training"] = step_training()
