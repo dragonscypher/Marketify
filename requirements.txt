@@ -1,0 +1,14 @@
+gradio>=4.44.0
+yfinance>=0.2.40
+pandas>=2.2.2
+numpy>=1.26.4
+xgboost>=2.1.1
+ta>=0.11.0
+plotly>=5.23.0
+scikit-learn>=1.5.1
+pytest>=8.3.0
+hypothesis>=6.112.0
+pyyaml>=6.0
+# Optional (enable Chronos one-step preview)
+chronos-forecasting>=1.2.0 ; platform_system!="Darwin" or platform_machine!="arm64"
+torch>=2.3.1 ; platform_system!="Darwin" or platform_machine!="arm64"
