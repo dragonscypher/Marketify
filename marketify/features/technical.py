@@ -10,21 +10,32 @@ from ta.volatility import AverageTrueRange
 def _as_1d_series(df: pd.DataFrame, col: str) -> pd.Series:
     """Extract *col* from *df* as a guaranteed 1-D numeric pandas Series.
 
-    Handles three yfinance column layouts:
+    Handles every yfinance column layout:
     1. Normal flat columns  – ``df['Close']`` is already a Series.
-    2. MultiIndex columns   – ``df['Close']`` returns a single-column DataFrame
-       (e.g. shape (N, 1)) because the real column is ``('Close', 'AAPL')``.
-    3. Already-squeezed Series from a prior flatten step.
-
-    After extraction the values are coerced to numeric and the result is
-    renamed so downstream code always sees a clean ``pd.Series`` named *col*.
+    2. MultiIndex field-first – ``('Close', 'AAPL')``
+    3. MultiIndex ticker-first – ``('AAPL', 'Close')``
+    4. Already-squeezed Series from a prior flatten step.
     """
-    s = df[col]
-    # MultiIndex selection can yield a DataFrame with one column
+    if isinstance(df.columns, pd.MultiIndex):
+        candidates = [c for c in df.columns
+                      if isinstance(c, tuple) and col in c]
+        if not candidates:
+            raise KeyError(f"Missing {col!r}. Columns={list(df.columns)[:10]}")
+        s = df.loc[:, candidates[0]]
+    else:
+        s = df[col]
+
     if isinstance(s, pd.DataFrame):
         s = s.iloc[:, 0]
+    s = s.squeeze()
+    if not isinstance(s, pd.Series):
+        s = pd.Series(s, index=df.index)
     s = pd.to_numeric(s, errors="coerce")
+    s.index = df.index
     s.name = col
+
+    if getattr(s, "ndim", 1) != 1:
+        raise ValueError(f"{col} not 1-D after normalization. shape={getattr(s, 'shape', None)}")
     return s
 
 
@@ -53,9 +64,6 @@ TECHNICAL_FEATURE_COLUMNS = [
 
 def add_technical_features(df: pd.DataFrame) -> pd.DataFrame:
     out = df.copy()
-    # Flatten MultiIndex columns if present (yfinance single-ticker quirk)
-    if isinstance(out.columns, pd.MultiIndex):
-        out.columns = out.columns.get_level_values(0)
 
     close = _as_1d_series(out, "Close")
     high = _as_1d_series(out, "High")

@@ -70,7 +70,7 @@ def compute_benchmark(
     # Sharpe ratio (annualised from per-snapshot returns)
     if len(returns) > 1 and float(returns.std()) > 0:
         excess = returns - risk_free_rate / max(n_points, 1)
-        sharpe_ratio = float(excess.mean() / returns.std()) * np.sqrt(min(n_points, 252))
+        sharpe_ratio = float(float(excess.mean() / returns.std()) * np.sqrt(min(n_points, 252)))
     else:
         sharpe_ratio = 0.0
 
@@ -88,7 +88,7 @@ def compute_benchmark(
         max_drawdown=max_drawdown,
         sharpe_ratio=sharpe_ratio,
         cvar_95=cvar_95,
-        weekly_pass=weekly_return >= weekly_goal,
-        drawdown_pass=max_drawdown <= max_drawdown_limit,
-        sharpe_pass=sharpe_ratio >= sharpe_floor,
+        weekly_pass=bool(weekly_return >= weekly_goal),
+        drawdown_pass=bool(max_drawdown <= max_drawdown_limit),
+        sharpe_pass=bool(sharpe_ratio >= sharpe_floor),
     )

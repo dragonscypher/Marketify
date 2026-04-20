@@ -7,49 +7,83 @@ import pytest
 
 from marketify.features.technical import add_technical_features
 
+EXPECTED_COLS = ["ema_10", "ema_20", "rsi_14", "macd", "macd_signal", "atr_14", "vol_20"]
 
-def _make_yfinance_multiindex_df(rows: int = 200) -> pd.DataFrame:
-    """Build a DataFrame that mimics yfinance single-ticker MultiIndex output."""
+
+def _base_ohlcv(rows: int = 200):
     rng = np.random.default_rng(42)
     idx = pd.date_range("2025-01-02 09:30", periods=rows, freq="5min")
-
     base = 180.0 + rng.normal(0, 0.5, rows).cumsum()
-    data = {
-        ("Close", "AAPL"): base,
-        ("High", "AAPL"): base + rng.uniform(0.1, 1.0, rows),
-        ("Low", "AAPL"): base - rng.uniform(0.1, 1.0, rows),
-        ("Open", "AAPL"): base + rng.normal(0, 0.3, rows),
-        ("Volume", "AAPL"): rng.integers(1000, 50000, rows).astype(float),
-    }
-    df = pd.DataFrame(data, index=idx)
-    df.columns = pd.MultiIndex.from_tuples(df.columns)
-    return df
+    return idx, base, rng
 
 
-def test_multiindex_produces_features():
-    df = _make_yfinance_multiindex_df(200)
-    result = add_technical_features(df)
-
+def _assert_features(result):
     assert not result.empty
-    for col in ["ema_10", "rsi_14", "macd", "atr_14"]:
+    for col in EXPECTED_COLS:
         assert col in result.columns, f"Missing expected column: {col}"
 
 
-def test_flat_columns_still_work():
-    """Normal flat-column DataFrame must still work."""
-    rng = np.random.default_rng(99)
-    idx = pd.date_range("2025-03-01 09:30", periods=200, freq="5min")
-    base = 100.0 + rng.normal(0, 0.3, 200).cumsum()
+def test_flat_columns():
+    """Normal flat-column DataFrame."""
+    idx, base, rng = _base_ohlcv()
     df = pd.DataFrame(
         {
             "Close": base,
-            "High": base + rng.uniform(0.05, 0.5, 200),
-            "Low": base - rng.uniform(0.05, 0.5, 200),
-            "Open": base + rng.normal(0, 0.2, 200),
-            "Volume": rng.integers(500, 30000, 200).astype(float),
+            "High": base + rng.uniform(0.1, 1.0, 200),
+            "Low": base - rng.uniform(0.1, 1.0, 200),
+            "Open": base + rng.normal(0, 0.3, 200),
+            "Volume": rng.integers(1000, 50000, 200).astype(float),
         },
         index=idx,
     )
-    result = add_technical_features(df)
-    assert not result.empty
-    assert "ema_10" in result.columns
+    _assert_features(add_technical_features(df))
+
+
+def test_multiindex_field_first():
+    """yfinance MultiIndex: ('Close', 'AAPL') — field first."""
+    idx, base, rng = _base_ohlcv()
+    data = {
+        ("Close", "AAPL"): base,
+        ("High", "AAPL"): base + rng.uniform(0.1, 1.0, 200),
+        ("Low", "AAPL"): base - rng.uniform(0.1, 1.0, 200),
+        ("Open", "AAPL"): base + rng.normal(0, 0.3, 200),
+        ("Volume", "AAPL"): rng.integers(1000, 50000, 200).astype(float),
+    }
+    df = pd.DataFrame(data, index=idx)
+    df.columns = pd.MultiIndex.from_tuples(df.columns)
+    _assert_features(add_technical_features(df))
+
+
+def test_multiindex_ticker_first():
+    """yfinance MultiIndex: ('AAPL', 'Close') — ticker first."""
+    idx, base, rng = _base_ohlcv()
+    data = {
+        ("AAPL", "Close"): base,
+        ("AAPL", "High"): base + rng.uniform(0.1, 1.0, 200),
+        ("AAPL", "Low"): base - rng.uniform(0.1, 1.0, 200),
+        ("AAPL", "Open"): base + rng.normal(0, 0.3, 200),
+        ("AAPL", "Volume"): rng.integers(1000, 50000, 200).astype(float),
+    }
+    df = pd.DataFrame(data, index=idx)
+    df.columns = pd.MultiIndex.from_tuples(df.columns)
+    _assert_features(add_technical_features(df))
+
+
+def test_single_col_dataframe_close():
+    """Selecting 'Close' from MultiIndex gives single-column DataFrame."""
+    idx, base, rng = _base_ohlcv()
+    data = {
+        ("Close", "AAPL"): base,
+        ("High", "AAPL"): base + rng.uniform(0.1, 1.0, 200),
+        ("Low", "AAPL"): base - rng.uniform(0.1, 1.0, 200),
+        ("Open", "AAPL"): base + rng.normal(0, 0.3, 200),
+        ("Volume", "AAPL"): rng.integers(1000, 50000, 200).astype(float),
+    }
+    df = pd.DataFrame(data, index=idx)
+    df.columns = pd.MultiIndex.from_tuples(df.columns)
+    # Verify the problem scenario: df['Close'] is a DataFrame
+    close = df["Close"]
+    assert isinstance(close, pd.DataFrame), "Expected DataFrame for MultiIndex selection"
+    assert close.ndim == 2
+    # But add_technical_features handles it
+    _assert_features(add_technical_features(df))
