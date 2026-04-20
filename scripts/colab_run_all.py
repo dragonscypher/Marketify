@@ -15,6 +15,10 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 REPORTS = ROOT / "reports"
 
+# Allow `from scripts.colab_check import ...` when running from project root
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
 
 def _ensure_dir(p: Path) -> None:
     p.mkdir(parents=True, exist_ok=True)
@@ -31,11 +35,12 @@ def _run(cmd: list[str], label: str) -> subprocess.CompletedProcess:
 
 
 def check_colab() -> bool:
-    from scripts.colab_check import is_colab, print_info
+    from scripts.colab_check import is_colab, print_info, get_runtime_info
     print_info()
     require = os.environ.get("MARKETIFY_REQUIRE_COLAB", "0") == "1"
     if require and not is_colab():
-        print("FATAL: Colab required but not connected. Aborting.")
+        print("FATAL: Colab required but not connected.")
+        print("Do NOT fake COLAB_RELEASE_TAG. Switch to real Colab kernel.")
         return False
     return True
 
@@ -121,11 +126,27 @@ def generate_next_status(results: dict[str, int]) -> Path:
     path = REPORTS / "NEXT_STATUS.md"
     ts = datetime.now(timezone.utc).isoformat()
 
+    # Collect runtime info
+    try:
+        from scripts.colab_check import get_runtime_info
+        ri = get_runtime_info()
+    except Exception:
+        ri = {"is_colab": False, "colab_tag": "N/A", "platform": "unknown",
+              "gpu": "unknown", "system_ram_gb": None}
+
     all_pass = all(v == 0 for v in results.values())
     lines = [
         "# NEXT_STATUS — Marketify Paper Engine",
         f"**Generated:** {ts}",
         f"**Overall:** {'PASS' if all_pass else 'FAIL'}",
+        "",
+        "## Runtime",
+        f"- Colab: {ri['is_colab']}",
+        f"- COLAB_TAG: {ri.get('colab_tag', 'N/A')}",
+        f"- Platform: {ri.get('platform', 'unknown')}",
+        f"- GPU: {ri.get('gpu', 'unknown')}",
+        f"- GPU RAM: {ri.get('gpu_ram_gb', 'N/A')} GB" if ri.get('gpu_ram_gb') else "- GPU RAM: N/A",
+        f"- System RAM: {ri.get('system_ram_gb', 'N/A')} GB" if ri.get('system_ram_gb') else "- System RAM: N/A",
         "",
         "## Step Results",
         "| Step | Exit Code | Status |",
