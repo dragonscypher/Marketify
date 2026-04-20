@@ -98,26 +98,21 @@ def step_training() -> int:
 
 
 def step_benchmark() -> int:
-    """Run benchmark checker on broker equity history."""
+    """Run SMOKE benchmark with synthetic equity — not real profit."""
     print(f"\n{'='*60}")
-    print("[STEP] Benchmark check")
+    print("[STEP] Smoke benchmark (SYNTHETIC — not real profit)")
     print(f"{'='*60}")
     try:
-        from marketify.broker.paper import PaperBroker
-        from marketify.config import BrokerConfig
         from marketify.backtest.benchmark import compute_benchmark
 
-        cfg = BrokerConfig()
-        broker = PaperBroker(cfg)
-        history = broker.get_equity_history()
-        if not history or len(history) < 2:
-            print("[INFO] Not enough equity history for benchmark. Generating synthetic check.")
-            history = [
-                {"ts": f"2026-01-0{i+1}T00:00:00", "equity": 10000 + i * 50}
-                for i in range(7)
-            ]
+        history = [
+            {"ts": f"2026-01-0{i+1}T00:00:00", "equity": 10000 + i * 50}
+            for i in range(7)
+        ]
         result = compute_benchmark(history, weekly_goal=0.01)
         report = {
+            "source": "synthetic_smoke_test",
+            "synthetic": True,
             "weekly_return": result.weekly_return,
             "weekly_pass": result.weekly_pass,
             "max_drawdown": result.max_drawdown,
@@ -126,17 +121,24 @@ def step_benchmark() -> int:
             "sharpe_pass": result.sharpe_pass,
         }
         _ensure_dir(REPORTS)
-        with open(REPORTS / "benchmark_report.json", "w") as f:
+        with open(REPORTS / "smoke_benchmark_report.json", "w") as f:
             json.dump(report, f, indent=2)
 
         status = "PASS" if result.weekly_pass else "FAIL"
-        print(f"Weekly return: {result.weekly_return:.4%} → {status} (goal: 1%)")
-        print(f"Max drawdown:  {result.max_drawdown:.4%} → {'PASS' if result.drawdown_pass else 'FAIL'}")
-        print(f"Sharpe ratio:  {result.sharpe_ratio:.3f} → {'PASS' if result.sharpe_pass else 'FAIL'}")
+        print(f"[SYNTHETIC] Weekly return: {result.weekly_return:.4%} → {status}")
+        print(f"[SYNTHETIC] Sharpe ratio:  {result.sharpe_ratio:.3f}")
+        print("[NOTE] This is synthetic data. Not real profit.")
         return 0
     except Exception as e:
-        print(f"[ERROR] Benchmark: {e}")
+        print(f"[ERROR] Smoke benchmark: {e}")
         return 1
+
+
+def step_real_benchmark() -> int:
+    """Run real walk-forward backtest + benchmark."""
+    r = _run([sys.executable, "scripts/run_backtest_and_benchmark.py"],
+             "Real backtest + benchmark")
+    return r.returncode
 
 
 def generate_next_status(results: dict[str, int]) -> Path:
@@ -173,6 +175,27 @@ def generate_next_status(results: dict[str, int]) -> Path:
     for step, code in results.items():
         tag = "PASS" if code == 0 else "FAIL"
         lines.append(f"| {step} | {code} | {tag} |")
+
+    # Append real benchmark detail if available
+    rb_path = REPORTS / "real_benchmark.json"
+    if rb_path.exists():
+        try:
+            with open(rb_path) as f:
+                rb = json.load(f)
+            lines.append("")
+            lines.append("## Real Benchmark")
+            lines.append(f"- Source: {rb.get('source', 'unknown')}")
+            lines.append(f"- Synthetic: {rb.get('synthetic', 'unknown')}")
+            lines.append(f"- Status: {rb.get('status', 'unknown')}")
+            lines.append(f"- Weekly return: {rb.get('weekly_return_pct', 0)}%")
+            lines.append(f"- Daily return: {rb.get('daily_return_pct', 0)}%")
+            lines.append(f"- Max drawdown: {rb.get('max_drawdown_pct', 0)}%")
+            lines.append(f"- Sharpe ratio: {rb.get('sharpe_ratio', 0)}")
+            lines.append(f"- CVaR 5%: {rb.get('cvar_95_pct', 0)}%")
+            lines.append(f"- Trade count: {rb.get('trade_count', 0)}")
+        except Exception:
+            pass
+
     lines.append("")
     lines.append("## Safety")
     lines.append("- Paper mode: DEFAULT")
@@ -205,7 +228,8 @@ def main() -> int:
     results["pytest"] = step_pytest()
     results["validation"] = step_validation()
     results["training"] = step_training()
-    results["benchmark"] = step_benchmark()
+    results["smoke_benchmark"] = step_benchmark()
+    results["real_benchmark"] = step_real_benchmark()
 
     generate_next_status(results)
 
