@@ -14,6 +14,14 @@ from marketify.models.xgb_model import rolling_train_predict
 from marketify.risk.risk_engine import RiskEngine
 
 
+def _scalar(row, col: str) -> float:
+    """Extract scalar float from row[col], handling both scalar and 1-element Series."""
+    value = row[col]
+    if hasattr(value, "iloc"):
+        return float(value.iloc[0])
+    return float(value)
+
+
 def evaluate_exit_price(
     side: str,
     stop_loss: float,
@@ -62,10 +70,11 @@ def run_walk_forward_backtest(config: AppConfig) -> dict:
     open_state: dict[str, dict] = {}
 
     equity_points: list[tuple[pd.Timestamp, float]] = []
+    trade_diagnostics: list[dict] = []
 
     for ts in preds.dropna().index:
         row = feat.loc[ts]
-        price = float(row["Close"])
+        price = _scalar(row, "Close")
         broker.update_market_price(config.data.ticker, price)
 
         if config.data.ticker in open_state:
@@ -76,11 +85,10 @@ def run_walk_forward_backtest(config: AppConfig) -> dict:
                 side=state["side"],
                 stop_loss=state["stop_loss"],
                 take_profit=state["take_profit"],
-                row_open=float(row["Open"]),
-                row_high=float(row["High"]),
-                row_low=float(row["Low"]),
+                row_open=_scalar(row, "Open"),
+                row_high=_scalar(row, "High"),
+                row_low=_scalar(row, "Low"),
                 bars_held=bars_held,
-                # Time-stop bug fix: use broker.time_stop_bars (not signal.time_stop_bars)
                 time_stop_bars=config.broker.time_stop_bars,
             )
 
@@ -96,17 +104,44 @@ def run_walk_forward_backtest(config: AppConfig) -> dict:
                         "risk_warning": "Paper backtest exit",
                     }
                 )
+                # Record trade diagnostic
+                entry_p = state["entry_price"]
+                if state["side"] == "buy":
+                    pnl = (exit_price - entry_p) * state["qty"]
+                    ret_pct = (exit_price / entry_p - 1.0) * 100 if entry_p > 0 else 0.0
+                else:
+                    pnl = (entry_p - exit_price) * state["qty"]
+                    ret_pct = (1.0 - exit_price / entry_p) * 100 if entry_p > 0 else 0.0
+
+                trade_diagnostics.append({
+                    "timestamp": str(ts),
+                    "symbol": config.data.ticker,
+                    "side": state["side"],
+                    "qty": state["qty"],
+                    "entry_price": entry_p,
+                    "exit_price": float(exit_price),
+                    "pnl": round(pnl, 4),
+                    "return_pct": round(ret_pct, 4),
+                    "hold_bars": bars_held,
+                    "signal_confidence": state.get("confidence", 0.0),
+                    "expected_return": state.get("expected_return", 0.0),
+                    "cvar_95": state.get("cvar_95", 0.0),
+                    "stop_loss": state["stop_loss"],
+                    "take_profit": state["take_profit"],
+                    "exit_reason": exit_reason,
+                })
                 open_state.pop(config.data.ticker, None)
 
         expected = float(preds.loc[ts])
         cvar_95 = compute_cvar_95(feat["ret_1"].iloc[max(0, feat.index.get_loc(ts) - 250): feat.index.get_loc(ts) + 1])
         sentiment_score = sentiment.analyze(config.data.ticker).score
+        vol_20 = _scalar(row, "vol_20")
         info = TradeIdeaInput(
             symbol=config.data.ticker,
             last_price=price,
             prediction=expected,
             sentiment_score=sentiment_score,
-            volatility=float(row["vol_20"]),
+            volatility=vol_20,
             news_risk=0.0,
         )
         account = broker.get_account()
@@ -133,6 +168,10 @@ def run_walk_forward_backtest(config: AppConfig) -> dict:
                     "stop_loss": idea.stop_loss,
                     "take_profit": idea.take_profit,
                     "bars_held": 0,
+                    "entry_price": price,
+                    "confidence": idea.confidence,
+                    "expected_return": idea.expected_return,
+                    "cvar_95": idea.cvar_95,
                 }
 
         equity_points.append((ts, broker.get_account()["equity"]))
@@ -143,4 +182,5 @@ def run_walk_forward_backtest(config: AppConfig) -> dict:
         "orders": pd.DataFrame(broker.get_orders()),
         "fills": pd.DataFrame(broker.get_fills()),
         "positions": pd.DataFrame(broker.get_positions()),
+        "trade_diagnostics": pd.DataFrame(trade_diagnostics),
     }

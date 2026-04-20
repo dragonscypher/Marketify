@@ -3,10 +3,12 @@
 Produces:
   reports/trades.csv
   reports/equity_curve.csv
+  reports/trade_diagnostics.csv
   reports/model_leaderboard.csv
   reports/model_leaderboard.md
   reports/real_benchmark.md
   reports/real_benchmark.json
+  reports/failure_analysis.md
 """
 from __future__ import annotations
 
@@ -41,7 +43,7 @@ def main() -> int:
     _ensure_dir(REPORTS)
 
     # --- 1. Train / load models ---
-    print("[1/5] Training models (if needed)...")
+    print("[1/6] Training models (if needed)...")
     leaderboard = train_if_missing(config)
     lb_df = pd.DataFrame(leaderboard)
     lb_df.to_csv(REPORTS / "model_leaderboard.csv", index=False)
@@ -61,14 +63,15 @@ def main() -> int:
     print(f"  Leaderboard: {len(leaderboard)} models saved.")
 
     # --- 2. Walk-forward backtest ---
-    print("[2/5] Running walk-forward backtest...")
+    print("[2/6] Running walk-forward backtest...")
     result = run_walk_forward_backtest(config)
     equity: pd.Series = result["equity"]
     orders: pd.DataFrame = result["orders"]
     fills: pd.DataFrame = result["fills"]
+    trade_diag: pd.DataFrame = result.get("trade_diagnostics", pd.DataFrame())
 
     # --- 3. Save trades + equity curve ---
-    print("[3/5] Saving trades and equity curve...")
+    print("[3/6] Saving trades and equity curve...")
     if not fills.empty:
         fills.to_csv(REPORTS / "trades.csv", index=False)
     else:
@@ -79,11 +82,17 @@ def main() -> int:
     eq_df = pd.DataFrame({"ts": equity.index, "equity": equity.values})
     eq_df.to_csv(REPORTS / "equity_curve.csv", index=False)
 
+    # Save trade diagnostics
+    if not trade_diag.empty:
+        trade_diag.to_csv(REPORTS / "trade_diagnostics.csv", index=False)
+    else:
+        pd.DataFrame().to_csv(REPORTS / "trade_diagnostics.csv", index=False)
+
     trade_count = len(fills) if not fills.empty else 0
     print(f"  Trades: {trade_count}, Equity points: {len(equity)}")
 
     # --- 4. Compute real benchmark ---
-    print("[4/5] Computing real benchmark...")
+    print("[4/6] Computing real benchmark...")
 
     if trade_count == 0:
         # No trades = honest FAIL
@@ -116,8 +125,15 @@ def main() -> int:
     with open(REPORTS / "real_benchmark.json", "w") as f:
         json.dump(report, f, indent=2)
 
-    # --- 5. Write real_benchmark.md ---
-    print("[5/5] Writing real_benchmark.md...")
+    # --- 5. Failure analysis ---
+    print("[5/6] Generating failure analysis...")
+    from marketify.backtest.failure_analysis import generate_failure_analysis
+
+    fa_path = generate_failure_analysis(trade_diag, equity, report, REPORTS)
+    print(f"  Written: {fa_path}")
+
+    # --- 6. Write real_benchmark.md ---
+    print("[6/6] Writing real_benchmark.md...")
     ts_now = datetime.now(timezone.utc).isoformat()
     md = [
         "# Real Backtest Benchmark",

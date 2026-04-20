@@ -147,6 +147,13 @@ def step_real_benchmark() -> int:
     return r.returncode
 
 
+def step_tuning() -> int:
+    """Run validation-only parameter tuning."""
+    r = _run([sys.executable, "scripts/run_validation_tuning.py"],
+             "Validation-only tuning")
+    return r.returncode
+
+
 def generate_next_status(results: dict[str, int]) -> Path:
     _ensure_dir(REPORTS)
     path = REPORTS / "NEXT_STATUS.md"
@@ -202,6 +209,30 @@ def generate_next_status(results: dict[str, int]) -> Path:
         except Exception:
             pass
 
+    # Tuning leaderboard info
+    tuning_path = REPORTS / "tuning_leaderboard.csv"
+    if tuning_path.exists():
+        try:
+            import pandas as pd
+            tdf = pd.read_csv(tuning_path)
+            accepted = tdf[~tdf["rejected"]].sort_values("sharpe_ratio", ascending=False)
+            lines.append("")
+            lines.append("## Validation Tuning")
+            lines.append(f"- Total configs evaluated: {len(tdf)}")
+            lines.append(f"- Accepted configs: {len(accepted)}")
+            if len(accepted) > 0:
+                best = accepted.iloc[0]
+                lines.append(f"- Best weekly return: {best['weekly_return_pct']}%")
+                lines.append(f"- Best Sharpe: {best['sharpe_ratio']}")
+                lines.append(f"- Best config: SL={best['stop_loss_pct']} TP={best['take_profit_pct']} "
+                             f"POS={best['max_position_fraction']} TS={int(best['time_stop_bars'])}")
+                weekly_target_met = best['weekly_return_pct'] >= 1.0
+                lines.append(f"- Meets 1% weekly target: {'YES' if weekly_target_met else 'NO — FAIL'}")
+            else:
+                lines.append("- All configs rejected by safety constraints.")
+        except Exception:
+            pass
+
     lines.append("")
     lines.append("## Safety")
     lines.append("- Paper mode: DEFAULT")
@@ -236,6 +267,7 @@ def main() -> int:
     results["training"] = step_training()
     results["smoke_benchmark"] = step_benchmark()
     results["real_benchmark"] = step_real_benchmark()
+    results["tuning"] = step_tuning()
 
     generate_next_status(results)
 
