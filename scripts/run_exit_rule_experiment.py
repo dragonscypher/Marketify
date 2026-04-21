@@ -5,11 +5,15 @@ Implements:
 - Fixed and volatility-adjusted time-stop variants.
 - Optional trailing stop activated after profit threshold.
 - Horizon-alignment check (model horizon vs time_stop_bars).
+- Prediction caching so rolling model predictions are computed once per split.
 - Quick mode, resumable checkpoints, and incremental report writes.
 
 Outputs:
     reports/exit_rule_experiment.csv
     reports/exit_rule_experiment.md
+    reports/exit_rule_diagnostics.csv
+    reports/exit_rule_diagnostics.md
+    reports/exit_rule_predictions_cache.parquet
     reports/exit_rule_experiment_checkpoint.json
 """
 from __future__ import annotations
@@ -66,6 +70,50 @@ PARAM_KEY_FIELDS = (
     "max_position_fraction",
 )
 
+BASELINE_WEEKLY_RETURN_PCT = 0.5851
+
+SIGNAL_DIAGNOSTIC_COLUMNS = (
+    "timestamp",
+    "symbol",
+    "side",
+    "predicted_return",
+    "realized_return_after_signal",
+    "signal_hit",
+    "risk_approved",
+    "volatility",
+    "volatility_regime",
+)
+
+TRADE_DIAGNOSTIC_COLUMNS = (
+    "timestamp",
+    "symbol",
+    "side",
+    "qty",
+    "entry_price",
+    "exit_price",
+    "pnl",
+    "return_pct",
+    "hold_bars",
+    "signal_confidence",
+    "expected_return",
+    "cvar_95",
+    "stop_loss",
+    "take_profit",
+    "effective_time_stop_bars",
+    "exit_reason",
+    "volatility",
+    "volatility_regime",
+)
+
+DIAGNOSTIC_COLUMNS = (
+    "section",
+    "group",
+    "metric",
+    "value",
+    "count",
+    "notes",
+)
+
 
 @dataclass(frozen=True)
 class ValidationSplitMeta:
@@ -109,6 +157,9 @@ class ExperimentPaths:
     output_dir: Path
     csv_path: Path
     md_path: Path
+    diagnostics_csv_path: Path
+    diagnostics_md_path: Path
+    predictions_cache_path: Path
     checkpoint_path: Path
 
 
@@ -122,6 +173,7 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--quick", action="store_true", help="Run small starter slice (max 8 configs).")
     parser.add_argument("--max-configs", type=int, default=None, help="Limit selected config count.")
     parser.add_argument("--resume", action="store_true", help="Resume from checkpoint in output dir.")
+    parser.add_argument("--rebuild-cache", action="store_true", help="Force regeneration of cached predictions.")
     parser.add_argument("--output-dir", default="reports", help="Directory for CSV/Markdown/checkpoint artifacts.")
     args = parser.parse_args(argv)
     if args.max_configs is not None and args.max_configs < 0:
@@ -141,6 +193,9 @@ def _build_experiment_paths(output_dir: Path) -> ExperimentPaths:
         output_dir=output_dir,
         csv_path=output_dir / "exit_rule_experiment.csv",
         md_path=output_dir / "exit_rule_experiment.md",
+        diagnostics_csv_path=output_dir / "exit_rule_diagnostics.csv",
+        diagnostics_md_path=output_dir / "exit_rule_diagnostics.md",
+        predictions_cache_path=output_dir / "exit_rule_predictions_cache.parquet",
         checkpoint_path=output_dir / "exit_rule_experiment_checkpoint.json",
     )
 
@@ -155,6 +210,40 @@ def _result_config_key(result: ExitExperimentResult | dict[str, object]) -> str:
     else:
         payload = {field: result[field] for field in PARAM_KEY_FIELDS}
     return json.dumps(payload, sort_keys=True)
+
+
+def _empty_signal_diagnostics() -> pd.DataFrame:
+    return pd.DataFrame(columns=SIGNAL_DIAGNOSTIC_COLUMNS)
+
+
+def _empty_trade_diagnostics() -> pd.DataFrame:
+    return pd.DataFrame(columns=TRADE_DIAGNOSTIC_COLUMNS)
+
+
+def _empty_diagnostics_df() -> pd.DataFrame:
+    return pd.DataFrame(columns=DIAGNOSTIC_COLUMNS)
+
+
+def _select_best_result(df: pd.DataFrame) -> pd.Series | None:
+    if df.empty:
+        return None
+
+    ranked = df.copy()
+    if "rejected" not in ranked.columns:
+        ranked["rejected"] = False
+    return ranked.sort_values(["rejected", "weekly_return_pct", "sharpe"], ascending=[True, False, False]).iloc[0]
+
+
+def _best_result_to_params(best_result: pd.Series | dict[str, object]) -> dict[str, object]:
+    payload = best_result.to_dict() if isinstance(best_result, pd.Series) else best_result
+    return {field: payload[field] for field in PARAM_KEY_FIELDS}
+
+
+def _beats_baseline(best_result: pd.Series | dict[str, object] | None) -> bool:
+    if best_result is None:
+        return False
+    payload = best_result.to_dict() if isinstance(best_result, pd.Series) else best_result
+    return (not bool(payload.get("rejected", False))) and float(payload.get("weekly_return_pct", float("-inf"))) >= BASELINE_WEEKLY_RETURN_PCT
 
 
 def _select_experiment_params(quick: bool = False, max_configs: int | None = None) -> list[dict[str, object]]:
@@ -205,6 +294,20 @@ def _restore_results_from_checkpoint(
     return restored_results, completed_keys
 
 
+def _write_diagnostics_reports(
+    paths: ExperimentPaths,
+    diagnostics_df: pd.DataFrame | None,
+    best_result: pd.Series | None,
+    run_status: str,
+) -> None:
+    df = _empty_diagnostics_df() if diagnostics_df is None else diagnostics_df.copy()
+    df = df.reindex(columns=DIAGNOSTIC_COLUMNS)
+    df.to_csv(paths.diagnostics_csv_path, index=False)
+
+    md = build_exit_rule_diagnostics_markdown(df, best_result, run_status)
+    paths.diagnostics_md_path.write_text(md, encoding="utf-8")
+
+
 def _write_checkpoint_and_reports(
     paths: ExperimentPaths,
     results: list[ExitExperimentResult],
@@ -225,6 +328,8 @@ def _write_checkpoint_and_reports(
         completed_configs=len(completed_keys),
     )
     paths.md_path.write_text(md, encoding="utf-8")
+
+    _write_diagnostics_reports(paths, _empty_diagnostics_df(), _select_best_result(df), run_status)
 
     checkpoint = {
         "completed_config_keys": sorted(completed_keys),
@@ -292,6 +397,113 @@ def split_for_validation_experiment(
     return train_val, validation_index, meta
 
 
+def _compute_rolling_predictions(train_val: pd.DataFrame) -> pd.Series:
+    from marketify.config import AppConfig
+    from marketify.features.technical import TECHNICAL_FEATURE_COLUMNS
+    from marketify.models.xgb_model import rolling_train_predict
+
+    config = AppConfig()
+    if len(train_val) <= config.model.train_window + 10:
+        config.model.train_window = max(200, min(config.model.train_window, len(train_val) - 20))
+        config.model.retrain_every = max(50, min(config.model.retrain_every, max(60, len(train_val) // 8)))
+
+    raw_preds = rolling_train_predict(
+        frame=train_val,
+        feature_cols=TECHNICAL_FEATURE_COLUMNS,
+        target_col="target_next_ret",
+        config=config.model,
+    )
+    if isinstance(raw_preds, pd.Series):
+        preds = raw_preds.rename("prediction")
+    else:
+        preds = pd.Series(raw_preds, index=train_val.index[-len(raw_preds):], name="prediction")
+    return pd.to_numeric(preds, errors="coerce").reindex(train_val.index).rename("prediction")
+
+
+def _write_predictions_cache(cache_path: Path, predictions: pd.Series) -> None:
+    try:
+        predictions.rename("prediction").to_frame().to_parquet(cache_path)
+    except (ImportError, ModuleNotFoundError, ValueError) as exc:
+        raise RuntimeError("Prediction cache requires parquet support. Install pyarrow or fastparquet.") from exc
+
+
+def _read_predictions_cache(cache_path: Path) -> pd.Series | None:
+    if not cache_path.exists():
+        return None
+    try:
+        cache_df = pd.read_parquet(cache_path)
+    except Exception as exc:
+        print(f"[EXIT-EXPERIMENT] Warning: ignoring unreadable prediction cache {cache_path}: {exc}")
+        return None
+
+    if "prediction" in cache_df.columns:
+        preds = cache_df["prediction"]
+    elif cache_df.shape[1] == 1:
+        preds = cache_df.iloc[:, 0].rename("prediction")
+    else:
+        print(f"[EXIT-EXPERIMENT] Warning: prediction cache missing 'prediction' column: {cache_path}")
+        return None
+    return pd.to_numeric(preds, errors="coerce").rename("prediction")
+
+
+def _load_or_build_prediction_cache(
+    train_val: pd.DataFrame,
+    paths: ExperimentPaths,
+    rebuild_cache: bool = False,
+) -> pd.Series:
+    if not rebuild_cache:
+        cached = _read_predictions_cache(paths.predictions_cache_path)
+        if cached is not None and cached.index.equals(train_val.index):
+            print(f"[EXIT-EXPERIMENT] Using cached predictions {paths.predictions_cache_path}")
+            return cached.reindex(train_val.index)
+        if cached is not None:
+            print("[EXIT-EXPERIMENT] Prediction cache index mismatch. Rebuilding cache.")
+    else:
+        print(f"[EXIT-EXPERIMENT] Rebuilding prediction cache {paths.predictions_cache_path}")
+
+    predictions = _compute_rolling_predictions(train_val)
+    _write_predictions_cache(paths.predictions_cache_path, predictions)
+    print(f"[EXIT-EXPERIMENT] Saved prediction cache {paths.predictions_cache_path}")
+    return predictions
+
+
+def _compute_realized_signal_return(train_val: pd.DataFrame, ts: pd.Timestamp) -> float:
+    row = train_val.loc[ts]
+    if "target_next_ret" in train_val.columns:
+        target_next_ret = _scalar(row, "target_next_ret")
+        if np.isfinite(target_next_ret):
+            return float(target_next_ret)
+
+    ts_loc = int(train_val.index.get_indexer([ts])[0])
+    if ts_loc < 0 or ts_loc + MODEL_HORIZON_BARS >= len(train_val):
+        return float("nan")
+
+    current_price = _scalar(row, "Close")
+    next_price = _scalar(train_val.iloc[ts_loc + MODEL_HORIZON_BARS], "Close")
+    if current_price <= 0:
+        return float("nan")
+    return float(next_price / current_price - 1.0)
+
+
+def _volatility_regime_bounds(train_val: pd.DataFrame, validation_index: pd.Index) -> tuple[float, float]:
+    validation_vol = train_val.loc[validation_index, "vol_20"].replace([np.inf, -np.inf], np.nan).dropna()
+    if validation_vol.empty:
+        return 0.0, 0.0
+    low = float(validation_vol.quantile(0.33))
+    high = float(validation_vol.quantile(0.67))
+    return low, max(low, high)
+
+
+def _label_volatility_regime(volatility: float, low_cutoff: float, high_cutoff: float) -> str:
+    if not np.isfinite(volatility):
+        return "unknown"
+    if volatility <= low_cutoff:
+        return "low"
+    if volatility <= high_cutoff:
+        return "medium"
+    return "high"
+
+
 def _compute_trade_metrics(diag: pd.DataFrame) -> dict[str, float | int | str]:
     trade_count = int(len(diag)) if not diag.empty else 0
     if trade_count == 0:
@@ -337,7 +549,8 @@ def _run_single_config(
     validation_index: pd.Index,
     split_meta: ValidationSplitMeta,
     params: dict,
-) -> ExitExperimentResult:
+    preds: pd.Series,
+) -> tuple[ExitExperimentResult, pd.DataFrame, pd.DataFrame]:
     from marketify.backtest.benchmark import compute_benchmark
     from marketify.backtest.exit_rules import (ExitRuleConfig,
                                                build_exit_levels,
@@ -345,10 +558,8 @@ def _run_single_config(
     from marketify.broker.paper import PaperBroker
     from marketify.config import AppConfig
     from marketify.features.sentiment import FinBERTSentiment
-    from marketify.features.technical import TECHNICAL_FEATURE_COLUMNS
     from marketify.models.ensemble import (TradeIdeaInput, build_trade_idea,
                                            compute_cvar_95)
-    from marketify.models.xgb_model import rolling_train_predict
     from marketify.risk.risk_engine import RiskEngine
 
     reject_reasons: list[str] = []
@@ -374,18 +585,6 @@ def _run_single_config(
     )
     config.broker.db_path = f"data/exit_exp_{hash(db_key) & 0xFFFFFFFF}.db"
 
-    # Keep train_window valid for current split, but never include final test slice.
-    if len(train_val) <= config.model.train_window + 10:
-        config.model.train_window = max(200, min(config.model.train_window, len(train_val) - 20))
-        config.model.retrain_every = max(50, min(config.model.retrain_every, max(60, len(train_val) // 8)))
-
-    preds = rolling_train_predict(
-        frame=train_val,
-        feature_cols=TECHNICAL_FEATURE_COLUMNS,
-        target_col="target_next_ret",
-        config=config.model,
-    )
-
     broker = PaperBroker(config.broker)
     risk_engine = RiskEngine(config.risk, config.broker)
     sentiment = FinBERTSentiment(enabled=False)
@@ -404,8 +603,10 @@ def _run_single_config(
     vol_ref = float(train_val["vol_20"].replace([np.inf, -np.inf], np.nan).dropna().median())
     if not np.isfinite(vol_ref) or vol_ref <= 0:
         vol_ref = 0.01
+    vol_low_cutoff, vol_high_cutoff = _volatility_regime_bounds(train_val, validation_index)
 
     equity_points: list[tuple[pd.Timestamp, float]] = []
+    signal_diagnostics: list[dict[str, object]] = []
     trade_diagnostics: list[dict] = []
 
     ticker = config.data.ticker
@@ -418,6 +619,7 @@ def _run_single_config(
         row_low = _scalar(row, "Low")
         vol_20 = _scalar(row, "vol_20")
         atr_14 = _scalar(row, "atr_14")
+        volatility_regime = _label_volatility_regime(vol_20, vol_low_cutoff, vol_high_cutoff)
 
         broker.update_market_price(ticker, price)
 
@@ -478,6 +680,8 @@ def _run_single_config(
                         "take_profit": float(state["take_profit"]),
                         "effective_time_stop_bars": int(state.get("effective_time_stop_bars", exit_cfg.time_stop_bars)),
                         "exit_reason": str(exit_reason),
+                        "volatility": float(state.get("volatility", np.nan)),
+                        "volatility_regime": str(state.get("volatility_regime", "unknown")),
                     }
                 )
                 open_state.pop(ticker, None)
@@ -506,6 +710,23 @@ def _run_single_config(
                     news_risk=info.news_risk,
                     mark_price=price,
                 )
+                realized_after_signal = _compute_realized_signal_return(train_val, ts)
+                signal_hit = float("nan")
+                if np.isfinite(realized_after_signal):
+                    signal_hit = bool(realized_after_signal > 0.0) if idea.side == "buy" else bool(realized_after_signal < 0.0)
+                signal_diagnostics.append(
+                    {
+                        "timestamp": str(ts),
+                        "symbol": ticker,
+                        "side": idea.side,
+                        "predicted_return": float(expected),
+                        "realized_return_after_signal": float(realized_after_signal),
+                        "signal_hit": signal_hit,
+                        "risk_approved": bool(decision.approved),
+                        "volatility": float(vol_20),
+                        "volatility_regime": volatility_regime,
+                    }
+                )
                 if decision.approved:
                     broker.submit_order({**idea.to_dict(), "price": price})
                     dyn_stop, dyn_take = build_exit_levels(idea.side, price, atr_14, exit_cfg)
@@ -522,6 +743,8 @@ def _run_single_config(
                         "trailing_active": False,
                         "peak_price": float(price),
                         "trough_price": float(price),
+                        "volatility": float(vol_20),
+                        "volatility_regime": volatility_regime,
                     }
 
         equity_points.append((ts, broker.get_account()["equity"]))
@@ -530,7 +753,8 @@ def _run_single_config(
     history = [{"ts": str(ts), "equity": float(eq)} for ts, eq in zip(equity.index, equity.values)]
     bm = compute_benchmark(history, weekly_goal=0.01)
 
-    diag_df = pd.DataFrame(trade_diagnostics)
+    signal_df = pd.DataFrame(signal_diagnostics, columns=SIGNAL_DIAGNOSTIC_COLUMNS)
+    diag_df = pd.DataFrame(trade_diagnostics, columns=TRADE_DIAGNOSTIC_COLUMNS)
     trade_metrics = _compute_trade_metrics(diag_df)
 
     turnover = (trade_metrics["trade_count"] / max(len(equity), 1)) if len(equity) > 0 else 0.0
@@ -549,7 +773,7 @@ def _run_single_config(
     except Exception:
         pass
 
-    return ExitExperimentResult(
+    result = ExitExperimentResult(
         k_stop=float(params["k_stop"]),
         k_take=float(params["k_take"]),
         time_stop_bars=int(params["time_stop_bars"]),
@@ -573,6 +797,173 @@ def _run_single_config(
         rejected=bool(rejected),
         reject_reason="; ".join(reject_reasons),
     )
+    return result, signal_df, diag_df
+
+
+def _build_diagnostics_summary(
+    best_result: ExitExperimentResult,
+    signal_df: pd.DataFrame,
+    trade_df: pd.DataFrame,
+) -> pd.DataFrame:
+    rows: list[dict[str, object]] = []
+
+    def _add_row(section: str, group: str, metric: str, value: object, count: int = 0, notes: str = "") -> None:
+        rows.append(
+            {
+                "section": section,
+                "group": group,
+                "metric": metric,
+                "value": value,
+                "count": int(count),
+                "notes": notes,
+            }
+        )
+
+    signal_count = int(len(signal_df))
+    hit_rate = float(signal_df["signal_hit"].dropna().mean() * 100.0) if signal_df["signal_hit"].dropna().size > 0 else float("nan")
+    avg_predicted = float(signal_df["predicted_return"].mean()) if signal_count > 0 else float("nan")
+    avg_realized = float(signal_df["realized_return_after_signal"].mean()) if signal_count > 0 else float("nan")
+
+    _add_row("best_config", "overall", "weekly_return_pct", round(float(best_result.weekly_return_pct), 4), 1)
+    _add_row("best_config", "overall", "baseline_weekly_return_pct", BASELINE_WEEKLY_RETURN_PCT, 1)
+    _add_row("best_config", "overall", "beats_baseline", int(_beats_baseline(asdict(best_result))), 1, "1=yes, 0=no")
+
+    _add_row("signal_summary", "overall", "signal_count", signal_count, signal_count)
+    _add_row("signal_summary", "overall", "signal_hit_rate_pct", round(hit_rate, 4) if np.isfinite(hit_rate) else float("nan"), signal_count)
+    _add_row("signal_summary", "overall", "avg_predicted_return", round(avg_predicted, 6) if np.isfinite(avg_predicted) else float("nan"), signal_count)
+    _add_row(
+        "signal_summary",
+        "overall",
+        "avg_realized_return_after_signal",
+        round(avg_realized, 6) if np.isfinite(avg_realized) else float("nan"),
+        signal_count,
+    )
+
+    for section_name, group_col in (("exit_reason", "exit_reason"), ("volatility_regime", "volatility_regime"), ("side_performance", "side")):
+        if trade_df.empty or group_col not in trade_df.columns:
+            continue
+        for group_name, group in trade_df.groupby(group_col, dropna=False):
+            trade_count = int(len(group))
+            expectancy = float(group["pnl"].mean()) if trade_count > 0 else float("nan")
+            avg_return_pct = float(group["return_pct"].mean()) if trade_count > 0 else float("nan")
+            win_rate_pct = float((group["pnl"] > 0).mean() * 100.0) if trade_count > 0 else float("nan")
+            group_label = str(group_name)
+            _add_row(section_name, group_label, "trade_expectancy", round(expectancy, 6), trade_count)
+            _add_row(section_name, group_label, "avg_return_pct", round(avg_return_pct, 6), trade_count)
+            _add_row(section_name, group_label, "win_rate_pct", round(win_rate_pct, 4), trade_count)
+
+    return pd.DataFrame(rows, columns=DIAGNOSTIC_COLUMNS)
+
+
+def _format_metric(value: object, digits: int = 6) -> str:
+    if value is None:
+        return "n/a"
+    if isinstance(value, (float, np.floating)):
+        if not np.isfinite(float(value)):
+            return "n/a"
+        return f"{float(value):.{digits}f}"
+    if isinstance(value, (int, np.integer, bool)):
+        return str(int(value))
+    return str(value)
+
+
+def _diagnostic_metric(diagnostics_df: pd.DataFrame, section: str, group: str, metric: str) -> object | None:
+    subset = diagnostics_df.loc[
+        (diagnostics_df["section"] == section)
+        & (diagnostics_df["group"] == group)
+        & (diagnostics_df["metric"] == metric),
+        "value",
+    ]
+    if subset.empty:
+        return None
+    return subset.iloc[0]
+
+
+def _append_group_diagnostics_table(lines: list[str], diagnostics_df: pd.DataFrame, section: str, title: str, group_label: str) -> None:
+    section_df = diagnostics_df.loc[diagnostics_df["section"] == section].copy()
+    lines.append(f"## {title}")
+    if section_df.empty:
+        lines.extend(["No data.", ""])
+        return
+
+    counts = section_df.groupby("group")["count"].max()
+    pivot = section_df.pivot(index="group", columns="metric", values="value")
+    lines.append(f"| {group_label} | Trades | Expectancy | Avg Return % | Win Rate % |")
+    lines.append("|---|---:|---:|---:|---:|")
+    for group_name, row in pivot.sort_index().iterrows():
+        lines.append(
+            f"| {group_name} | {int(counts.get(group_name, 0))} | { _format_metric(row.get('trade_expectancy')) } "
+            f"| { _format_metric(row.get('avg_return_pct')) } | { _format_metric(row.get('win_rate_pct'), digits=4) } |"
+        )
+    lines.append("")
+
+
+def build_exit_rule_diagnostics_markdown(
+    diagnostics_df: pd.DataFrame,
+    best_result: pd.Series | None,
+    run_status: str = "COMPLETE",
+) -> str:
+    generated = datetime.now(timezone.utc).isoformat()
+    beats_baseline = _beats_baseline(best_result)
+
+    lines = [
+        "# Exit Rule Diagnostics",
+        f"**Generated:** {generated}",
+        f"**Run Status:** {run_status}",
+        "",
+    ]
+
+    if best_result is not None:
+        lines.extend(
+            [
+                "## Best Config",
+                f"- status: {'ACCEPTED' if not bool(best_result.get('rejected', False)) else 'REJECTED'}",
+                f"- k_stop: {best_result['k_stop']}",
+                f"- k_take: {best_result['k_take']}",
+                f"- time_stop_mode: {best_result['time_stop_mode']}",
+                f"- time_stop_bars: {int(best_result['time_stop_bars'])}",
+                f"- trailing_enabled: {bool(best_result['trailing_enabled'])}",
+                f"- weekly_return_pct: {best_result['weekly_return_pct']}",
+                f"- sharpe: {best_result['sharpe']}",
+                f"- baseline_weekly_return_pct: {BASELINE_WEEKLY_RETURN_PCT}",
+                f"- baseline comparison: {'PASS' if beats_baseline else 'FAIL'}",
+                "",
+            ]
+        )
+    else:
+        lines.extend(["## Best Config", "No completed config yet.", ""])
+
+    if diagnostics_df.empty:
+        lines.extend(
+            [
+                "## Summary",
+                "Detailed diagnostics pending final best-config replay.",
+                "",
+            ]
+        )
+        return "\n".join(lines)
+
+    lines.extend(
+        [
+            "## Signal Summary",
+            f"- signal_count: {_format_metric(_diagnostic_metric(diagnostics_df, 'signal_summary', 'overall', 'signal_count'), digits=0)}",
+            f"- signal_hit_rate_pct: {_format_metric(_diagnostic_metric(diagnostics_df, 'signal_summary', 'overall', 'signal_hit_rate_pct'), digits=4)}",
+            f"- avg_predicted_return: {_format_metric(_diagnostic_metric(diagnostics_df, 'signal_summary', 'overall', 'avg_predicted_return'))}",
+            f"- avg_realized_return_after_signal: {_format_metric(_diagnostic_metric(diagnostics_df, 'signal_summary', 'overall', 'avg_realized_return_after_signal'))}",
+            "",
+        ]
+    )
+
+    _append_group_diagnostics_table(lines, diagnostics_df, "exit_reason", "Trade Expectancy by Exit Reason", "Exit Reason")
+    _append_group_diagnostics_table(lines, diagnostics_df, "volatility_regime", "Trade Expectancy by Volatility Regime", "Volatility Regime")
+    _append_group_diagnostics_table(lines, diagnostics_df, "side_performance", "Long vs Short Performance", "Side")
+
+    side_groups = diagnostics_df.loc[diagnostics_df["section"] == "side_performance", "group"].dropna().astype(str).unique().tolist()
+    if len(side_groups) == 1:
+        missing_side = "sell" if side_groups[0] == "buy" else "buy"
+        lines.extend([f"Only {side_groups[0]} trades observed. No {missing_side} trades in best config.", ""])
+
+    return "\n".join(lines)
 
 
 def build_exit_rule_experiment_markdown(
@@ -584,6 +975,8 @@ def build_exit_rule_experiment_markdown(
 ) -> str:
     generated = datetime.now(timezone.utc).isoformat()
     accepted = df.loc[~df["rejected"]].copy() if "rejected" in df.columns else pd.DataFrame(columns=df.columns)
+    best = _select_best_result(df)
+    beats_baseline = _beats_baseline(best)
 
     lines = [
         "# Exit Rule Experiment (Validation Only)",
@@ -635,14 +1028,11 @@ def build_exit_rule_experiment_markdown(
         ]
     )
 
-    if len(accepted) > 0:
-        best = accepted.sort_values(["weekly_return_pct", "sharpe"], ascending=[False, False]).iloc[0]
-        target_met = float(best["weekly_return_pct"]) >= 1.0
-        threshold_summary = "PASS" if target_met else f"FAIL ({best['weekly_return_pct']}%)"
-
+    if best is not None:
         lines.extend(
             [
                 "## Best Validation Config",
+                f"- status: {'ACCEPTED' if not bool(best['rejected']) else 'REJECTED'}",
                 f"- k_stop: {best['k_stop']}",
                 f"- k_take: {best['k_take']}",
                 f"- time_stop_mode: {best['time_stop_mode']}",
@@ -660,7 +1050,10 @@ def build_exit_rule_experiment_markdown(
                 f"- avg_win: {best['avg_win']}",
                 f"- avg_loss: {best['avg_loss']}",
                 f"- expectancy: {best['expectancy']}",
-                f"- Validation weekly threshold (1.0%): {threshold_summary}",
+                f"- baseline_weekly_return_pct: {BASELINE_WEEKLY_RETURN_PCT}",
+                f"- beats baseline: {'YES' if beats_baseline else 'NO'}",
+                f"- Baseline comparison: {'PASS' if beats_baseline else 'FAIL'}",
+                f"- reject_reason: {best['reject_reason'] if str(best['reject_reason']).strip() else 'none'}",
                 "",
             ]
         )
@@ -681,18 +1074,21 @@ def build_exit_rule_experiment_markdown(
             "| k_stop | k_take | mode | bars | trail | weekly% | sharpe | dd% | trades | pf | expectancy |"
         )
         lines.append("|---:|---:|---|---:|---|---:|---:|---:|---:|---:|---:|")
-        for _, row in accepted.sort_values(["weekly_return_pct", "sharpe"], ascending=[False, False]).head(10).iterrows():
-            lines.append(
-                f"| {row['k_stop']} | {row['k_take']} | {row['time_stop_mode']} | {int(row['time_stop_bars'])} "
-                f"| {bool(row['trailing_enabled'])} | {row['weekly_return_pct']} | {row['sharpe']} "
-                f"| {row['max_drawdown_pct']} | {int(row['trade_count'])} | {row['profit_factor']} | {row['expectancy']} |"
-            )
+        if len(accepted) > 0:
+            for _, row in accepted.sort_values(["weekly_return_pct", "sharpe"], ascending=[False, False]).head(10).iterrows():
+                lines.append(
+                    f"| {row['k_stop']} | {row['k_take']} | {row['time_stop_mode']} | {int(row['time_stop_bars'])} "
+                    f"| {bool(row['trailing_enabled'])} | {row['weekly_return_pct']} | {row['sharpe']} "
+                    f"| {row['max_drawdown_pct']} | {int(row['trade_count'])} | {row['profit_factor']} | {row['expectancy']} |"
+                )
+        else:
+            lines.append("| n/a | n/a | n/a | n/a | n/a | n/a | n/a | n/a | n/a | n/a | n/a |")
         lines.append("")
     else:
         lines.extend(
             [
                 "## Best Validation Config",
-                "No accepted config. All completed candidates rejected by safety constraints.",
+                "No completed config yet.",
                 "",
             ]
         )
@@ -708,6 +1104,7 @@ def build_exit_rule_experiment_markdown(
             "## Disclaimer",
             "Validation experiment only. Real benchmark remains honest PASS/FAIL.",
             "No synthetic benchmark counted as real. No leverage increase used.",
+            "No profit promise.",
             "Past performance does not predict future results. Trading has risk.",
         ]
     )
@@ -735,6 +1132,7 @@ def main(argv: list[str] | None = None) -> int:
     feat = add_technical_features(raw)
 
     train_val, validation_index, split_meta = split_for_validation_experiment(feat)
+    predictions = _load_or_build_prediction_cache(train_val, paths, rebuild_cache=args.rebuild_cache)
 
     selected_params = _select_experiment_params(quick=args.quick, max_configs=args.max_configs)
     selected_keys = [_config_key(params) for params in selected_params]
@@ -774,7 +1172,7 @@ def main(argv: list[str] | None = None) -> int:
                 f"trail={params['trailing_enabled']}",
                 end="",
             )
-            one = _run_single_config(train_val, validation_index, split_meta, params)
+            one, _, _ = _run_single_config(train_val, validation_index, split_meta, params, predictions)
             tag = "REJECTED" if one.rejected else f"weekly={one.weekly_return_pct}% sharpe={one.sharpe}"
             print(f" -> {tag}")
             results.append(one)
@@ -813,23 +1211,34 @@ def main(argv: list[str] | None = None) -> int:
     )
 
     df = pd.DataFrame([asdict(result) for result in results])
+    best = _select_best_result(df)
+    if best is not None:
+        best_result, signal_df, trade_df = _run_single_config(
+            train_val,
+            validation_index,
+            split_meta,
+            _best_result_to_params(best),
+            predictions,
+        )
+        diagnostics_df = _build_diagnostics_summary(best_result, signal_df, trade_df)
+        _write_diagnostics_reports(paths, diagnostics_df, pd.Series(asdict(best_result)), "COMPLETE")
 
     print(f"\n[EXIT-EXPERIMENT] csv={paths.csv_path}")
     print(f"[EXIT-EXPERIMENT] md={paths.md_path}")
+    print(f"[EXIT-EXPERIMENT] diagnostics_csv={paths.diagnostics_csv_path}")
+    print(f"[EXIT-EXPERIMENT] diagnostics_md={paths.diagnostics_md_path}")
+    print(f"[EXIT-EXPERIMENT] prediction_cache={paths.predictions_cache_path}")
     print(f"[EXIT-EXPERIMENT] checkpoint={paths.checkpoint_path}")
 
-    accepted = df.loc[~df["rejected"]].copy() if "rejected" in df.columns else pd.DataFrame(columns=df.columns)
-    if len(accepted) == 0:
-        print("[EXIT-EXPERIMENT] RESULT: FAIL (no accepted config)")
+    if best is None:
+        print("[EXIT-EXPERIMENT] RESULT: FAIL (no completed config)")
         return 0
 
-    best = accepted.sort_values(["weekly_return_pct", "sharpe"], ascending=[False, False]).iloc[0]
-    meets_target = float(best["weekly_return_pct"]) >= 1.0
-    verdict = "PASS" if meets_target else "FAIL"
+    verdict = "PASS" if _beats_baseline(best) else "FAIL"
     print(
         "[EXIT-EXPERIMENT] RESULT: "
-        f"{verdict} weekly={best['weekly_return_pct']}% sharpe={best['sharpe']} "
-        f"dd={best['max_drawdown_pct']}% trades={int(best['trade_count'])}"
+        f"{verdict} weekly={best['weekly_return_pct']}% baseline={BASELINE_WEEKLY_RETURN_PCT}% "
+        f"sharpe={best['sharpe']} dd={best['max_drawdown_pct']}% trades={int(best['trade_count'])}"
     )
     return 0
 
