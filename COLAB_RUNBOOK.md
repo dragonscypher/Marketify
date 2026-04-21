@@ -78,7 +78,15 @@ Runs:
 python app.py
 ```
 
-### 5. Test UI Flow
+### 5. Direct Exit-Rule Experiment (Colab)
+
+```bash
+python -m pip install -r requirements-colab.txt
+python -m pip install -e .
+python scripts/run_exit_rule_experiment.py
+```
+
+### 6. Test UI Flow
 
 1. **Generate idea** — enter ticker (e.g., AAPL), click Generate.
 2. **Reject** — click Reject. Verify no order/fill.
@@ -88,7 +96,7 @@ python app.py
 6. **Reset halt** — click Reset. Re-enables trading.
 7. **Restart app** — verify SQLite state reloads.
 
-### 6. Check Reports
+### 7. Check Reports
 
 ```bash
 cat reports/NEXT_STATUS.md

@@ -12,6 +12,7 @@ Outputs:
 """
 from __future__ import annotations
 
+import importlib
 import itertools
 import json
 import os
@@ -101,6 +102,19 @@ def _scalar(row, col: str) -> float:
     return float(value)
 
 
+def _ensure_optional_dependencies_for_exit_experiment() -> None:
+    """Fail fast with clear instruction when optional TA dependency is missing."""
+    try:
+        importlib.import_module("ta")
+    except ModuleNotFoundError as exc:
+        if getattr(exc, "name", None) == "ta":
+            print(
+                "Missing dependency: ta. Run python -m pip install -r requirements-colab.txt",
+                file=sys.stderr,
+            )
+        raise
+
+
 def split_for_validation_experiment(
     frame: pd.DataFrame,
     train_fraction: float = TRAIN_FRACTION,
@@ -182,12 +196,15 @@ def _run_single_config(
     params: dict,
 ) -> ExitExperimentResult:
     from marketify.backtest.benchmark import compute_benchmark
-    from marketify.backtest.exit_rules import ExitRuleConfig, build_exit_levels, evaluate_dynamic_exit
+    from marketify.backtest.exit_rules import (ExitRuleConfig,
+                                               build_exit_levels,
+                                               evaluate_dynamic_exit)
     from marketify.broker.paper import PaperBroker
     from marketify.config import AppConfig
     from marketify.features.sentiment import FinBERTSentiment
     from marketify.features.technical import TECHNICAL_FEATURE_COLUMNS
-    from marketify.models.ensemble import TradeIdeaInput, build_trade_idea, compute_cvar_95
+    from marketify.models.ensemble import (TradeIdeaInput, build_trade_idea,
+                                           compute_cvar_95)
     from marketify.models.xgb_model import rolling_train_predict
     from marketify.risk.risk_engine import RiskEngine
 
@@ -533,6 +550,8 @@ def build_exit_rule_experiment_markdown(df: pd.DataFrame, split_meta: Validation
 
 
 def main() -> int:
+    _ensure_optional_dependencies_for_exit_experiment()
+
     from marketify.data.market_data import fetch_market_data
     from marketify.features.technical import add_technical_features
 

@@ -5,12 +5,12 @@ import json
 import pandas as pd
 import pytest
 
-from marketify.backtest.exit_rules import ExitRuleConfig, atr_scaled_exit_pcts, evaluate_dynamic_exit
+from marketify.backtest.exit_rules import (ExitRuleConfig,
+                                           atr_scaled_exit_pcts,
+                                           evaluate_dynamic_exit)
 from scripts.run_exit_rule_experiment import (
-    ValidationSplitMeta,
-    build_exit_rule_experiment_markdown,
-    split_for_validation_experiment,
-)
+    ValidationSplitMeta, _ensure_optional_dependencies_for_exit_experiment,
+    build_exit_rule_experiment_markdown, split_for_validation_experiment)
 
 
 def test_atr_exit_math_deterministic():
@@ -85,6 +85,19 @@ def test_experiment_split_does_not_touch_final_test_split():
     assert meta.test_split_touched is False
     assert train_val.index.max() < test_start_ts
     assert validation_index.max() < test_start_ts
+
+
+def test_missing_ta_dependency_message_is_clear(monkeypatch, capsys):
+    def _raise_missing_ta(_name: str):
+        raise ModuleNotFoundError("No module named 'ta'", name="ta")
+
+    monkeypatch.setattr("scripts.run_exit_rule_experiment.importlib.import_module", _raise_missing_ta)
+
+    with pytest.raises(ModuleNotFoundError):
+        _ensure_optional_dependencies_for_exit_experiment()
+
+    captured = capsys.readouterr()
+    assert "Missing dependency: ta. Run python -m pip install -r requirements-colab.txt" in captured.err
 
 
 def test_report_never_claims_guaranteed_profit():
