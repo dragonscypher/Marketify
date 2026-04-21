@@ -154,7 +154,19 @@ def step_tuning() -> int:
     return r.returncode
 
 
-def generate_next_status(results: dict[str, int], benchmark_status: str, tuning_status: str) -> Path:
+def step_strategy_failure_analysis() -> int:
+    """Run deep-dive strategy failure analysis report generator."""
+    r = _run([sys.executable, "scripts/analyze_strategy_failure.py"],
+             "Strategy failure deep-dive")
+    return r.returncode
+
+
+def generate_next_status(
+    results: dict[str, int],
+    benchmark_status: str,
+    tuning_status: str,
+    strategy_analysis_status: str = "UNKNOWN",
+) -> Path:
     _ensure_dir(REPORTS)
     path = REPORTS / "NEXT_STATUS.md"
     ts = datetime.now(timezone.utc).isoformat()
@@ -168,7 +180,15 @@ def generate_next_status(results: dict[str, int], benchmark_status: str, tuning_
               "gpu": "unknown", "system_ram_gb": None}
 
     # Determine runtime status (benchmark/tuning excluded — those are strategy results)
-    RUNTIME_STEPS = {"requirements", "audit", "pytest", "validation", "training", "smoke_benchmark"}
+    RUNTIME_STEPS = {
+        "requirements",
+        "audit",
+        "pytest",
+        "validation",
+        "training",
+        "smoke_benchmark",
+        "strategy_failure_analysis",
+    }
     runtime_fail = any(v != 0 for k, v in results.items() if k in RUNTIME_STEPS)
     runtime_status = "FAIL" if runtime_fail else "PASS"
 
@@ -179,6 +199,7 @@ def generate_next_status(results: dict[str, int], benchmark_status: str, tuning_
         f"- Runtime Status: {runtime_status}",
         f"- Real Benchmark Status: {benchmark_status}",
         f"- Tuning Status: {tuning_status}",
+        f"- Strategy Analysis Status: {strategy_analysis_status}",
         "",
         "> NOTE: Real Benchmark FAIL = strategy did not meet 1% weekly target.",
         "> This is NOT a runtime crash. Pipeline ran to completion.",
@@ -249,6 +270,24 @@ def generate_next_status(results: dict[str, int], benchmark_status: str, tuning_
         except Exception:
             pass
 
+    # Strategy deep-dive summary
+    deep_dive = _read_strategy_deep_dive_summary()
+    if deep_dive:
+        lines.append("")
+        lines.append("## Strategy Failure Deep Dive")
+        lines.append(f"- Status: {strategy_analysis_status}")
+        if "real_benchmark_status" in deep_dive:
+            lines.append(f"- Real benchmark status in deep-dive: {deep_dive['real_benchmark_status']}")
+        if "weekly_return_pct" in deep_dive:
+            lines.append(f"- Weekly Return %: {deep_dive['weekly_return_pct']}")
+        if "expectancy_per_trade" in deep_dive:
+            lines.append(f"- Expectancy per trade: {deep_dive['expectancy_per_trade']}")
+        if "profit_factor" in deep_dive:
+            lines.append(f"- Profit factor: {deep_dive['profit_factor']}")
+        if "primary_cause" in deep_dive:
+            lines.append(f"- Primary cause: {deep_dive['primary_cause']}")
+        lines.append("- See: reports/strategy_failure_deep_dive.md")
+
     lines.append("")
     lines.append("## Safety")
     lines.append("- Paper mode: DEFAULT")
@@ -284,9 +323,6 @@ def main() -> int:
     results["training"] = step_training()
     results["smoke_benchmark"] = step_benchmark()
 
-    RUNTIME_STEPS = set(results.keys())
-    runtime_ok = all(v == 0 for v in results.values())
-
     # Benchmark — FAIL = strategy result, not crash; never exits nonzero for this
     rb_code = step_real_benchmark()
     results["real_benchmark"] = rb_code
@@ -295,9 +331,29 @@ def main() -> int:
     # Tuning — PASS if script ran (exit 0), even if no config hits target
     tuning_code = step_tuning()
     results["tuning"] = tuning_code
-    tuning_status = "PASS" if tuning_code == 0 else "FAIL"
+    tuning_status = "PASS" if tuning_code == 0 and _tuning_reports_exist() else "FAIL"
 
-    generate_next_status(results, benchmark_status, tuning_status)
+    # Deep-dive analyzer is report-generation runtime step
+    strategy_analysis_code = step_strategy_failure_analysis()
+    results["strategy_failure_analysis"] = strategy_analysis_code
+    strategy_analysis_status = "PASS" if strategy_analysis_code == 0 else "FAIL"
+
+    runtime_steps = {
+        "requirements",
+        "audit",
+        "pytest",
+        "validation",
+        "training",
+        "smoke_benchmark",
+        "strategy_failure_analysis",
+    }
+    runtime_ok = all(results.get(step, 1) == 0 for step in runtime_steps)
+
+    # If benchmark status cannot be read, treat as runtime error/crash
+    if benchmark_status not in {"PASS", "FAIL", "FAIL_NO_TRADES"}:
+        runtime_ok = False
+
+    generate_next_status(results, benchmark_status, tuning_status, strategy_analysis_status)
 
     runtime_status = "PASS" if runtime_ok else "FAIL"
     print(f"\n{'='*60}")
@@ -320,6 +376,41 @@ def _read_benchmark_status() -> str:
         return rb.get("status", "UNKNOWN")
     except Exception:
         return "UNKNOWN"
+
+
+def _tuning_reports_exist() -> bool:
+    """Tuning is considered complete only if both leaderboard files exist."""
+    return (REPORTS / "tuning_leaderboard.csv").exists() and (REPORTS / "tuning_leaderboard.md").exists()
+
+
+def _read_strategy_deep_dive_summary() -> dict[str, str]:
+    """Read key metrics from strategy_failure_deep_dive.csv for NEXT_STATUS summary."""
+    path = REPORTS / "strategy_failure_deep_dive.csv"
+    if not path.exists():
+        return {}
+
+    try:
+        import pandas as pd
+
+        df = pd.read_csv(path)
+        if df.empty or "metric" not in df.columns or "value" not in df.columns:
+            return {}
+
+        if "section" in df.columns:
+            head = df[df["section"] == "headline"]
+            if head.empty:
+                head = df
+        else:
+            head = df
+
+        metrics = {
+            str(row["metric"]): str(row["value"])
+            for _, row in head.iterrows()
+            if str(row.get("metric", "")).strip()
+        }
+        return metrics
+    except Exception:
+        return {}
 
 
 if __name__ == "__main__":
