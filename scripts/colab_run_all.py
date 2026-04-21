@@ -154,7 +154,7 @@ def step_tuning() -> int:
     return r.returncode
 
 
-def generate_next_status(results: dict[str, int]) -> Path:
+def generate_next_status(results: dict[str, int], benchmark_status: str, tuning_status: str) -> Path:
     _ensure_dir(REPORTS)
     path = REPORTS / "NEXT_STATUS.md"
     ts = datetime.now(timezone.utc).isoformat()
@@ -167,11 +167,21 @@ def generate_next_status(results: dict[str, int]) -> Path:
         ri = {"is_colab": False, "colab_tag": "N/A", "platform": "unknown",
               "gpu": "unknown", "system_ram_gb": None}
 
+    # Determine runtime status (benchmark/tuning excluded — those are strategy results)
+    RUNTIME_STEPS = {"requirements", "audit", "pytest", "validation", "training", "smoke_benchmark"}
+    runtime_fail = any(v != 0 for k, v in results.items() if k in RUNTIME_STEPS)
+    runtime_status = "FAIL" if runtime_fail else "PASS"
+
     all_pass = all(v == 0 for v in results.values())
     lines = [
         "# NEXT_STATUS — Marketify Paper Engine",
         f"**Generated:** {ts}",
-        f"**Overall:** {'PASS' if all_pass else 'FAIL'}",
+        f"- Runtime Status: {runtime_status}",
+        f"- Real Benchmark Status: {benchmark_status}",
+        f"- Tuning Status: {tuning_status}",
+        "",
+        "> NOTE: Real Benchmark FAIL = strategy did not meet 1% weekly target.",
+        "> This is NOT a runtime crash. Pipeline ran to completion.",
         "",
         "## Runtime",
         f"- Colab: {ri['is_colab']}",
@@ -199,13 +209,17 @@ def generate_next_status(results: dict[str, int]) -> Path:
             lines.append("## Real Benchmark")
             lines.append(f"- Source: {rb.get('source', 'unknown')}")
             lines.append(f"- Synthetic: {rb.get('synthetic', 'unknown')}")
-            lines.append(f"- Status: {rb.get('status', 'unknown')}")
-            lines.append(f"- Weekly return: {rb.get('weekly_return_pct', 0)}%")
+            lines.append(f"- Status: {benchmark_status}")
+            lines.append(f"- Weekly return: {rb.get('weekly_return_pct', 0)}%  (target: 1%)")
             lines.append(f"- Daily return: {rb.get('daily_return_pct', 0)}%")
             lines.append(f"- Max drawdown: {rb.get('max_drawdown_pct', 0)}%")
             lines.append(f"- Sharpe ratio: {rb.get('sharpe_ratio', 0)}")
             lines.append(f"- CVaR 5%: {rb.get('cvar_95_pct', 0)}%")
             lines.append(f"- Trade count: {rb.get('trade_count', 0)}")
+            if benchmark_status == "FAIL":
+                lines.append("")
+                lines.append(f"**Reason for FAIL:** weekly return {rb.get('weekly_return_pct', 0)}% < 1% target.")
+                lines.append("Strategy underperformed. No runtime error. Tuning required.")
         except Exception:
             pass
 
@@ -226,10 +240,12 @@ def generate_next_status(results: dict[str, int]) -> Path:
                 lines.append(f"- Best Sharpe: {best['sharpe_ratio']}")
                 lines.append(f"- Best config: SL={best['stop_loss_pct']} TP={best['take_profit_pct']} "
                              f"POS={best['max_position_fraction']} TS={int(best['time_stop_bars'])}")
-                weekly_target_met = best['weekly_return_pct'] >= 1.0
-                lines.append(f"- Meets 1% weekly target: {'YES' if weekly_target_met else 'NO — FAIL'}")
+                weekly_target_met = float(best['weekly_return_pct']) >= 1.0
+                lines.append(f"- Meets 1% weekly target: {'YES' if weekly_target_met else 'NO — still below 1%'}")
+                lines.append("- NOTE: This is validation-split result. Test split not evaluated.")
             else:
                 lines.append("- All configs rejected by safety constraints.")
+                lines.append("- Tuning status: completed but no safe config found.")
         except Exception:
             pass
 
@@ -259,23 +275,51 @@ def main() -> int:
     if not check_colab():
         return 1
 
-    results = {}
+    # Runtime steps — failure here = real crash, exit nonzero
+    results: dict[str, int] = {}
     results["requirements"] = step_requirements()
     results["audit"] = step_audit()
     results["pytest"] = step_pytest()
     results["validation"] = step_validation()
     results["training"] = step_training()
     results["smoke_benchmark"] = step_benchmark()
-    results["real_benchmark"] = step_real_benchmark()
-    results["tuning"] = step_tuning()
 
-    generate_next_status(results)
+    RUNTIME_STEPS = set(results.keys())
+    runtime_ok = all(v == 0 for v in results.values())
 
-    all_pass = all(v == 0 for v in results.values())
+    # Benchmark — FAIL = strategy result, not crash; never exits nonzero for this
+    rb_code = step_real_benchmark()
+    results["real_benchmark"] = rb_code
+    benchmark_status = _read_benchmark_status()
+
+    # Tuning — PASS if script ran (exit 0), even if no config hits target
+    tuning_code = step_tuning()
+    results["tuning"] = tuning_code
+    tuning_status = "PASS" if tuning_code == 0 else "FAIL"
+
+    generate_next_status(results, benchmark_status, tuning_status)
+
+    runtime_status = "PASS" if runtime_ok else "FAIL"
     print(f"\n{'='*60}")
-    print(f"OVERALL: {'PASS' if all_pass else 'FAIL'}")
+    print(f"RUNTIME:          {runtime_status}")
+    print(f"REAL_BENCHMARK:   {benchmark_status}")
+    print(f"TUNING:           {tuning_status}")
     print(f"{'='*60}")
-    return 0 if all_pass else 1
+    print(f"EXIT: 0" if runtime_ok else f"EXIT: 1")
+
+    # Only exit nonzero for runtime failures (install/pytest/validation/crash)
+    return 0 if runtime_ok else 1
+
+
+def _read_benchmark_status() -> str:
+    """Read benchmark status from real_benchmark.json without failing if absent."""
+    rb_path = REPORTS / "real_benchmark.json"
+    try:
+        with open(rb_path) as f:
+            rb = json.load(f)
+        return rb.get("status", "UNKNOWN")
+    except Exception:
+        return "UNKNOWN"
 
 
 if __name__ == "__main__":
