@@ -5,13 +5,16 @@ Implements:
 - Fixed and volatility-adjusted time-stop variants.
 - Optional trailing stop activated after profit threshold.
 - Horizon-alignment check (model horizon vs time_stop_bars).
+- Quick mode, resumable checkpoints, and incremental report writes.
 
 Outputs:
-  reports/exit_rule_experiment.csv
-  reports/exit_rule_experiment.md
+    reports/exit_rule_experiment.csv
+    reports/exit_rule_experiment.md
+    reports/exit_rule_experiment_checkpoint.json
 """
 from __future__ import annotations
 
+import argparse
 import importlib
 import itertools
 import json
@@ -52,6 +55,17 @@ EXIT_GRID = {
     "max_position_fraction": [0.10],
 }
 
+PARAM_KEY_FIELDS = (
+    "k_stop",
+    "k_take",
+    "time_stop_bars",
+    "time_stop_mode",
+    "trailing_enabled",
+    "trailing_activate_profit_pct",
+    "trailing_distance_pct",
+    "max_position_fraction",
+)
+
 
 @dataclass(frozen=True)
 class ValidationSplitMeta:
@@ -90,9 +104,138 @@ class ExitExperimentResult:
     reject_reason: str
 
 
+@dataclass(frozen=True)
+class ExperimentPaths:
+    output_dir: Path
+    csv_path: Path
+    md_path: Path
+    checkpoint_path: Path
+
+
 def _ensure_dir(path: Path) -> Path:
     path.mkdir(parents=True, exist_ok=True)
     return path
+
+
+def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Run exit-rule validation experiment.")
+    parser.add_argument("--quick", action="store_true", help="Run small starter slice (max 8 configs).")
+    parser.add_argument("--max-configs", type=int, default=None, help="Limit selected config count.")
+    parser.add_argument("--resume", action="store_true", help="Resume from checkpoint in output dir.")
+    parser.add_argument("--output-dir", default="reports", help="Directory for CSV/Markdown/checkpoint artifacts.")
+    args = parser.parse_args(argv)
+    if args.max_configs is not None and args.max_configs < 0:
+        parser.error("--max-configs must be >= 0")
+    return args
+
+
+def _resolve_output_dir(raw_output_dir: str) -> Path:
+    output_dir = Path(raw_output_dir)
+    if not output_dir.is_absolute():
+        output_dir = ROOT / output_dir
+    return output_dir
+
+
+def _build_experiment_paths(output_dir: Path) -> ExperimentPaths:
+    return ExperimentPaths(
+        output_dir=output_dir,
+        csv_path=output_dir / "exit_rule_experiment.csv",
+        md_path=output_dir / "exit_rule_experiment.md",
+        checkpoint_path=output_dir / "exit_rule_experiment_checkpoint.json",
+    )
+
+
+def _config_key(params: dict[str, object]) -> str:
+    return json.dumps({field: params[field] for field in PARAM_KEY_FIELDS}, sort_keys=True)
+
+
+def _result_config_key(result: ExitExperimentResult | dict[str, object]) -> str:
+    if isinstance(result, ExitExperimentResult):
+        payload = {field: getattr(result, field) for field in PARAM_KEY_FIELDS}
+    else:
+        payload = {field: result[field] for field in PARAM_KEY_FIELDS}
+    return json.dumps(payload, sort_keys=True)
+
+
+def _select_experiment_params(quick: bool = False, max_configs: int | None = None) -> list[dict[str, object]]:
+    keys = list(EXIT_GRID.keys())
+    params = [dict(zip(keys, combo)) for combo in itertools.product(*[EXIT_GRID[k] for k in keys])]
+    if quick:
+        params = params[:8]
+    if max_configs is not None:
+        params = params[:max_configs]
+    return params
+
+
+def _load_checkpoint(checkpoint_path: Path) -> dict[str, object] | None:
+    if not checkpoint_path.exists():
+        return None
+    try:
+        return json.loads(checkpoint_path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        print(f"[EXIT-EXPERIMENT] Warning: ignoring unreadable checkpoint {checkpoint_path}")
+        return None
+
+
+def _restore_results_from_checkpoint(
+    checkpoint: dict[str, object] | None,
+    selected_keys: set[str],
+) -> tuple[list[ExitExperimentResult], set[str]]:
+    if checkpoint is None:
+        return [], set()
+
+    restored_results: list[ExitExperimentResult] = []
+    restored_keys: set[str] = set()
+    for item in checkpoint.get("results", []):
+        if not isinstance(item, dict):
+            continue
+        try:
+            key = _result_config_key(item)
+            result = ExitExperimentResult(**item)
+        except (KeyError, TypeError):
+            continue
+        if key in selected_keys and key not in restored_keys:
+            restored_results.append(result)
+            restored_keys.add(key)
+
+    completed_keys = {
+        key for key in checkpoint.get("completed_config_keys", []) if isinstance(key, str) and key in selected_keys
+    }
+    completed_keys.update(restored_keys)
+    return restored_results, completed_keys
+
+
+def _write_checkpoint_and_reports(
+    paths: ExperimentPaths,
+    results: list[ExitExperimentResult],
+    split_meta: ValidationSplitMeta,
+    run_status: str,
+    total_configs: int,
+    selected_keys: list[str],
+    completed_keys: set[str],
+) -> None:
+    df = pd.DataFrame([asdict(result) for result in results])
+    df.to_csv(paths.csv_path, index=False)
+
+    md = build_exit_rule_experiment_markdown(
+        df,
+        split_meta,
+        run_status=run_status,
+        total_configs=total_configs,
+        completed_configs=len(completed_keys),
+    )
+    paths.md_path.write_text(md, encoding="utf-8")
+
+    checkpoint = {
+        "completed_config_keys": sorted(completed_keys),
+        "completed_configs": len(completed_keys),
+        "results": [asdict(result) for result in results],
+        "selected_config_keys": selected_keys,
+        "status": run_status,
+        "total_configs": total_configs,
+        "updated_at": datetime.now(timezone.utc).isoformat(),
+    }
+    paths.checkpoint_path.write_text(json.dumps(checkpoint, indent=2, sort_keys=True), encoding="utf-8")
 
 
 def _scalar(row, col: str) -> float:
@@ -432,13 +575,24 @@ def _run_single_config(
     )
 
 
-def build_exit_rule_experiment_markdown(df: pd.DataFrame, split_meta: ValidationSplitMeta) -> str:
+def build_exit_rule_experiment_markdown(
+    df: pd.DataFrame,
+    split_meta: ValidationSplitMeta,
+    run_status: str = "COMPLETE",
+    total_configs: int | None = None,
+    completed_configs: int | None = None,
+) -> str:
     generated = datetime.now(timezone.utc).isoformat()
-    accepted = df[~df["rejected"]].copy() if "rejected" in df.columns else pd.DataFrame()
+    accepted = df.loc[~df["rejected"]].copy() if "rejected" in df.columns else pd.DataFrame(columns=df.columns)
 
     lines = [
         "# Exit Rule Experiment (Validation Only)",
         f"**Generated:** {generated}",
+        f"**Run Status:** {run_status}",
+        "",
+        "## Run Progress",
+        f"- Completed configs: {completed_configs if completed_configs is not None else len(df)}",
+        f"- Selected configs: {total_configs if total_configs is not None else len(df)}",
         "",
         "## Scope",
         "- Validation split only experiments.",
@@ -450,6 +604,16 @@ def build_exit_rule_experiment_markdown(df: pd.DataFrame, split_meta: Validation
         f"- Model horizon bars: {MODEL_HORIZON_BARS}",
         "",
     ]
+
+    if run_status == "PARTIAL":
+        lines.extend(
+            [
+                "## Partial Run",
+                "Run interrupted or still in progress. Artifacts below reflect completed configs only.",
+                "Resume with --resume to continue same selected config set.",
+                "",
+            ]
+        )
 
     if bool(df.get("horizon_mismatch", pd.Series(dtype=bool)).any()):
         lines.extend(
@@ -464,7 +628,7 @@ def build_exit_rule_experiment_markdown(df: pd.DataFrame, split_meta: Validation
     lines.extend(
         [
             "## Aggregate",
-            f"- Total configs: {len(df)}",
+            f"- Total configs with results: {len(df)}",
             f"- Accepted configs: {len(accepted)}",
             f"- Rejected configs: {len(df) - len(accepted)}",
             "",
@@ -474,6 +638,7 @@ def build_exit_rule_experiment_markdown(df: pd.DataFrame, split_meta: Validation
     if len(accepted) > 0:
         best = accepted.sort_values(["weekly_return_pct", "sharpe"], ascending=[False, False]).iloc[0]
         target_met = float(best["weekly_return_pct"]) >= 1.0
+        threshold_summary = "PASS" if target_met else f"FAIL ({best['weekly_return_pct']}%)"
 
         lines.extend(
             [
@@ -495,7 +660,7 @@ def build_exit_rule_experiment_markdown(df: pd.DataFrame, split_meta: Validation
                 f"- avg_win: {best['avg_win']}",
                 f"- avg_loss: {best['avg_loss']}",
                 f"- expectancy: {best['expectancy']}",
-                f"- 1% weekly target: {'PASS' if target_met else f'FAIL ({best['weekly_return_pct']}%)'}",
+                f"- Validation weekly threshold (1.0%): {threshold_summary}",
                 "",
             ]
         )
@@ -527,7 +692,7 @@ def build_exit_rule_experiment_markdown(df: pd.DataFrame, split_meta: Validation
         lines.extend(
             [
                 "## Best Validation Config",
-                "No accepted config. All candidates rejected by safety constraints.",
+                "No accepted config. All completed candidates rejected by safety constraints.",
                 "",
             ]
         )
@@ -549,13 +714,21 @@ def build_exit_rule_experiment_markdown(df: pd.DataFrame, split_meta: Validation
     return "\n".join(lines)
 
 
-def main() -> int:
-    _ensure_optional_dependencies_for_exit_experiment()
+def main(argv: list[str] | None = None) -> int:
+    args = _parse_args(argv)
+
+    try:
+        _ensure_optional_dependencies_for_exit_experiment()
+    except ModuleNotFoundError as exc:
+        if getattr(exc, "name", None) == "ta":
+            return 1
+        raise
 
     from marketify.data.market_data import fetch_market_data
     from marketify.features.technical import add_technical_features
 
-    _ensure_dir(REPORTS)
+    output_dir = _ensure_dir(_resolve_output_dir(args.output_dir))
+    paths = _build_experiment_paths(output_dir)
 
     print("[EXIT-EXPERIMENT] Preparing market features...")
     raw = fetch_market_data(ticker="AAPL", interval="5m", period="60d", prepost=False)
@@ -563,37 +736,89 @@ def main() -> int:
 
     train_val, validation_index, split_meta = split_for_validation_experiment(feat)
 
-    keys = list(EXIT_GRID.keys())
-    combos = list(itertools.product(*[EXIT_GRID[k] for k in keys]))
-    total = len(combos)
-    print(f"[EXIT-EXPERIMENT] {total} configs on validation split only")
+    selected_params = _select_experiment_params(quick=args.quick, max_configs=args.max_configs)
+    selected_keys = [_config_key(params) for params in selected_params]
+    total = len(selected_params)
+    print(f"[EXIT-EXPERIMENT] {total} selected configs on validation split only")
 
-    results: list[ExitExperimentResult] = []
-    for i, combo in enumerate(combos, 1):
-        params = dict(zip(keys, combo))
-        print(
-            f"  [{i}/{total}] k_stop={params['k_stop']} k_take={params['k_take']} "
-            f"mode={params['time_stop_mode']} bars={params['time_stop_bars']} "
-            f"trail={params['trailing_enabled']}",
-            end="",
+    checkpoint = _load_checkpoint(paths.checkpoint_path) if args.resume else None
+    results, completed_keys = _restore_results_from_checkpoint(checkpoint, set(selected_keys))
+    if args.resume and checkpoint is not None:
+        print(f"[EXIT-EXPERIMENT] Resume restored {len(completed_keys)} completed configs")
+
+    initial_status = "COMPLETE" if total == 0 or len(completed_keys) >= total else "PARTIAL"
+    _write_checkpoint_and_reports(
+        paths,
+        results,
+        split_meta,
+        initial_status,
+        total,
+        selected_keys,
+        completed_keys,
+    )
+
+    try:
+        for i, params in enumerate(selected_params, 1):
+            config_key = selected_keys[i - 1]
+            if config_key in completed_keys:
+                print(
+                    f"  [{i}/{total}] k_stop={params['k_stop']} k_take={params['k_take']} "
+                    f"mode={params['time_stop_mode']} bars={params['time_stop_bars']} "
+                    f"trail={params['trailing_enabled']} -> SKIP (resume)"
+                )
+                continue
+
+            print(
+                f"  [{i}/{total}] k_stop={params['k_stop']} k_take={params['k_take']} "
+                f"mode={params['time_stop_mode']} bars={params['time_stop_bars']} "
+                f"trail={params['trailing_enabled']}",
+                end="",
+            )
+            one = _run_single_config(train_val, validation_index, split_meta, params)
+            tag = "REJECTED" if one.rejected else f"weekly={one.weekly_return_pct}% sharpe={one.sharpe}"
+            print(f" -> {tag}")
+            results.append(one)
+            completed_keys.add(config_key)
+            run_status = "COMPLETE" if len(completed_keys) >= total else "PARTIAL"
+            _write_checkpoint_and_reports(
+                paths,
+                results,
+                split_meta,
+                run_status,
+                total,
+                selected_keys,
+                completed_keys,
+            )
+    except KeyboardInterrupt:
+        print("\n[EXIT-EXPERIMENT] Interrupted. Partial artifacts saved.")
+        _write_checkpoint_and_reports(
+            paths,
+            results,
+            split_meta,
+            "PARTIAL",
+            total,
+            selected_keys,
+            completed_keys,
         )
-        one = _run_single_config(train_val, validation_index, split_meta, params)
-        tag = "REJECTED" if one.rejected else f"weekly={one.weekly_return_pct}% sharpe={one.sharpe}"
-        print(f" -> {tag}")
-        results.append(one)
+        return 130
 
-    df = pd.DataFrame([asdict(r) for r in results])
-    csv_path = REPORTS / "exit_rule_experiment.csv"
-    md_path = REPORTS / "exit_rule_experiment.md"
-    df.to_csv(csv_path, index=False)
+    _write_checkpoint_and_reports(
+        paths,
+        results,
+        split_meta,
+        "COMPLETE",
+        total,
+        selected_keys,
+        completed_keys,
+    )
 
-    md = build_exit_rule_experiment_markdown(df, split_meta)
-    md_path.write_text(md)
+    df = pd.DataFrame([asdict(result) for result in results])
 
-    print(f"\n[EXIT-EXPERIMENT] csv={csv_path}")
-    print(f"[EXIT-EXPERIMENT] md={md_path}")
+    print(f"\n[EXIT-EXPERIMENT] csv={paths.csv_path}")
+    print(f"[EXIT-EXPERIMENT] md={paths.md_path}")
+    print(f"[EXIT-EXPERIMENT] checkpoint={paths.checkpoint_path}")
 
-    accepted = df[~df["rejected"]]
+    accepted = df.loc[~df["rejected"]].copy() if "rejected" in df.columns else pd.DataFrame(columns=df.columns)
     if len(accepted) == 0:
         print("[EXIT-EXPERIMENT] RESULT: FAIL (no accepted config)")
         return 0
