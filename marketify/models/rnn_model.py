@@ -83,6 +83,29 @@ def _require_torch():
     return torch, nn, DataLoader, TensorDataset
 
 
+def _as_1d_series(frame: pd.DataFrame, col: str) -> pd.Series:
+    if isinstance(frame.columns, pd.MultiIndex):
+        candidates = [candidate for candidate in frame.columns if isinstance(candidate, tuple) and col in candidate]
+        if not candidates:
+            raise KeyError(f"Missing {col!r}. Columns={list(frame.columns)[:10]}")
+        values = frame.loc[:, candidates[0]]
+    else:
+        values = frame[col]
+
+    if isinstance(values, pd.DataFrame):
+        values = values.iloc[:, 0]
+    values = values.squeeze()
+    if not isinstance(values, pd.Series):
+        values = pd.Series(values, index=frame.index)
+    values = pd.to_numeric(values, errors="coerce")
+    values.index = frame.index
+    values.name = col
+
+    if getattr(values, "ndim", 1) != 1:
+        raise ValueError(f"{col} not 1-D after normalization. shape={getattr(values, 'shape', None)}")
+    return values
+
+
 def add_volatility_regime_feature(frame: pd.DataFrame) -> pd.DataFrame:
     out = frame.copy()
     vol = pd.to_numeric(out["vol_20"], errors="coerce").replace([np.inf, -np.inf], np.nan)
@@ -121,7 +144,7 @@ def build_aligned_labels(
     if mode not in {"return", "direction"}:
         raise ValueError("mode must be 'return' or 'direction'")
 
-    price = pd.to_numeric(frame[price_col], errors="coerce")
+    price = _as_1d_series(frame, price_col)
     future_return = price.shift(-hold_horizon_bars) / price - 1.0
     column_name = f"target_h{hold_horizon_bars}_{mode}"
     if mode == "direction":
@@ -149,7 +172,7 @@ def prepare_recurrent_training_frame(
     mode: RecurrentLabelMode = "return",
 ) -> tuple[pd.DataFrame, list[str], str]:
     out, feature_cols = build_recurrent_feature_frame(frame)
-    target = build_aligned_labels(out, hold_horizon_bars=hold_horizon_bars, mode=mode)
+    target = build_aligned_labels(out, hold_horizon_bars=hold_horizon_bars, mode=mode, price_col="Close")
     out[target.name] = target
     out = out.dropna(subset=[*feature_cols, target.name]).copy()
     return out, feature_cols, target.name

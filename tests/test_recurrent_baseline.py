@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import numpy as np
 import pandas as pd
 import pytest
 
@@ -39,15 +40,64 @@ def _make_split_meta() -> ValidationSplitMeta:
     )
 
 
+def _make_close_index() -> pd.DatetimeIndex:
+    return pd.date_range("2026-01-01", periods=5, freq="5min")
+
+
+def _assert_h2_return(labels: pd.Series) -> None:
+    assert labels.name == "target_h2_return"
+    assert labels.iloc[0] == pytest.approx(0.10)
+    assert labels.iloc[1] == pytest.approx(115.0 / 105.0 - 1.0)
+
+
 def test_label_horizon_matches_hold_horizon():
-    idx = pd.date_range("2026-01-01", periods=5, freq="5min")
+    idx = _make_close_index()
     frame = pd.DataFrame({"Close": [100.0, 105.0, 110.0, 115.0, 120.0]}, index=idx)
 
     labels = build_aligned_labels(frame, hold_horizon_bars=2, mode="return")
 
-    assert labels.name == "target_h2_return"
-    assert labels.iloc[0] == pytest.approx(0.10)
-    assert labels.iloc[1] == pytest.approx(115.0 / 105.0 - 1.0)
+    _assert_h2_return(labels)
+
+
+def test_build_aligned_labels_handles_field_first_multiindex_close():
+    idx = _make_close_index()
+    columns = pd.MultiIndex.from_tuples([("Close", "AAPL")])
+    frame = pd.DataFrame([[100.0], [105.0], [110.0], [115.0], [120.0]], index=idx, columns=columns)
+
+    labels = build_aligned_labels(frame, hold_horizon_bars=2, mode="return")
+
+    _assert_h2_return(labels)
+
+
+def test_build_aligned_labels_handles_ticker_first_multiindex_close():
+    idx = _make_close_index()
+    columns = pd.MultiIndex.from_tuples([("AAPL", "Close")])
+    frame = pd.DataFrame([[100.0], [105.0], [110.0], [115.0], [120.0]], index=idx, columns=columns)
+
+    labels = build_aligned_labels(frame, hold_horizon_bars=2, mode="return")
+
+    _assert_h2_return(labels)
+
+
+def test_build_aligned_labels_handles_duplicate_flat_close_columns():
+    idx = _make_close_index()
+    frame = pd.DataFrame(
+        np.array(
+            [
+                [100.0, 100.0],
+                [105.0, 105.0],
+                [110.0, 110.0],
+                [115.0, 115.0],
+                [120.0, 120.0],
+            ]
+        ),
+        index=idx,
+        columns=["Close", "Close"],
+    )
+
+    labels = build_aligned_labels(frame, hold_horizon_bars=2, mode="return")
+
+    _assert_h2_return(labels)
 
 
 def test_gru_and_lstm_train_pipeline_import_cleanly():
