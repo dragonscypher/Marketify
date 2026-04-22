@@ -115,6 +115,40 @@ def _as_1d_series(frame: pd.DataFrame, col: str) -> pd.Series:
     return data
 
 
+def _flatten_recurrent_frame(frame: pd.DataFrame) -> pd.DataFrame:
+    import pandas as pd
+
+    try:
+        from marketify.features.technical import _as_1d_series as technical_as_1d_series
+    except ModuleNotFoundError as exc:
+        if getattr(exc, "name", None) != "ta":
+            raise
+        technical_as_1d_series = _as_1d_series
+
+    required_ohlcv = ["Open", "High", "Low", "Close", "Volume"]
+    out = pd.DataFrame(index=frame.index)
+
+    for col in required_ohlcv:
+        out[col] = technical_as_1d_series(frame, col)
+
+    for col in frame.columns:
+        if isinstance(col, str) and col not in out.columns:
+            data = frame[col]
+            if isinstance(data, pd.DataFrame):
+                data = data.iloc[:, 0]
+            out[col] = pd.to_numeric(data, errors="coerce")
+
+    for col in TECHNICAL_FEATURE_COLUMNS:
+        if col in out.columns:
+            continue
+        try:
+            out[col] = _as_1d_series(frame, col)
+        except KeyError:
+            continue
+
+    return out
+
+
 def add_volatility_regime_feature(frame: pd.DataFrame) -> pd.DataFrame:
     out = frame.copy()
     vol = pd.to_numeric(out["vol_20"], errors="coerce").replace([np.inf, -np.inf], np.nan)
@@ -165,7 +199,8 @@ def build_aligned_labels(
 
 
 def build_recurrent_feature_frame(frame: pd.DataFrame) -> tuple[pd.DataFrame, list[str]]:
-    out = add_volatility_regime_feature(frame)
+    out = _flatten_recurrent_frame(frame)
+    out = add_volatility_regime_feature(out)
     feature_cols: list[str] = []
     for col in [*OHLCV_COLUMNS, *TECHNICAL_FEATURE_COLUMNS, VOLATILITY_REGIME_CODE_COLUMN]:
         if col in out.columns and col not in feature_cols:
@@ -183,6 +218,9 @@ def prepare_recurrent_training_frame(
     out, feature_cols = build_recurrent_feature_frame(frame)
     target = build_aligned_labels(out, hold_horizon_bars=hold_horizon_bars, mode=mode, price_col="Close")
     out[target.name] = target
+    missing = [col for col in [*feature_cols, target.name] if col not in out.columns]
+    if missing:
+        raise KeyError(f"Missing recurrent columns after flatten: {missing}. columns={list(out.columns)[:50]}")
     out = out.dropna(subset=[*feature_cols, target.name]).copy()
     return out, feature_cols, target.name
 

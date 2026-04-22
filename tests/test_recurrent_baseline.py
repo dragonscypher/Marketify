@@ -6,6 +6,7 @@ import pytest
 
 from marketify.models.rnn_model import (TECHNICAL_FEATURE_COLUMNS,
                                         build_aligned_labels,
+                                        prepare_recurrent_training_frame,
                                         make_recurrent_model)
 from scripts.compare_models import (build_recurrent_leaderboard_markdown,
                                     prepare_validation_only_data)
@@ -42,6 +43,50 @@ def _make_split_meta() -> ValidationSplitMeta:
 
 def _make_close_index() -> pd.DatetimeIndex:
     return pd.date_range("2026-01-01", periods=5, freq="5min")
+
+
+def _make_recurrent_multiindex_frame(order: str, rows: int = 96) -> pd.DataFrame:
+    idx = pd.date_range("2026-01-01", periods=rows, freq="5min")
+    base = {
+        "Open": 100.0 + np.arange(rows) * 0.05,
+        "High": 100.2 + np.arange(rows) * 0.05,
+        "Low": 99.8 + np.arange(rows) * 0.05,
+        "Close": 100.1 + np.arange(rows) * 0.05,
+        "Volume": 1000.0 + np.arange(rows),
+    }
+
+    engineered = {
+        "ret_1": np.linspace(0.001, 0.002, rows),
+        "ret_5": np.linspace(0.002, 0.003, rows),
+        "ret_15": np.linspace(0.003, 0.004, rows),
+        "ema_dist_10": np.linspace(0.01, 0.02, rows),
+        "ema_dist_20": np.linspace(0.02, 0.03, rows),
+        "ema_dist_50": np.linspace(0.03, 0.04, rows),
+        "rsi_14": np.linspace(40.0, 60.0, rows),
+        "macd": np.linspace(0.1, 0.3, rows),
+        "macd_signal": np.linspace(0.05, 0.25, rows),
+        "macd_hist": np.linspace(0.02, 0.04, rows),
+        "atr_14": np.linspace(0.5, 0.8, rows),
+        "vol_20": np.linspace(0.01, 0.03, rows),
+        "sin_hour": np.linspace(-1.0, 1.0, rows),
+        "cos_hour": np.linspace(1.0, -1.0, rows),
+        "sin_min": np.linspace(-0.5, 0.5, rows),
+        "cos_min": np.linspace(0.5, -0.5, rows),
+        "is_morning": np.where(np.arange(rows) % 3 == 0, 1.0, 0.0),
+        "is_afternoon": np.where(np.arange(rows) % 3 == 1, 1.0, 0.0),
+        "is_late": np.where(np.arange(rows) % 3 == 2, 1.0, 0.0),
+    }
+
+    columns: dict[tuple[str, str], np.ndarray] = {}
+    ticker = "AAPL"
+    for name, values in base.items():
+        key = (name, ticker) if order == "field_first" else (ticker, name)
+        columns[key] = values
+    for name, values in engineered.items():
+        key = (name, ticker) if order == "field_first" else (ticker, name)
+        columns[key] = values
+
+    return pd.DataFrame(columns, index=idx)
 
 
 def _assert_h2_return(labels: pd.Series) -> None:
@@ -100,6 +145,28 @@ def test_build_aligned_labels_handles_duplicate_flat_close_columns():
     _assert_h2_return(labels)
 
 
+def test_prepare_recurrent_training_frame_accepts_field_first_multiindex_ohlcv():
+    frame = _make_recurrent_multiindex_frame("field_first")
+
+    out, feature_cols, target_col = prepare_recurrent_training_frame(frame, hold_horizon_bars=48, mode="return")
+
+    assert target_col == "target_h48_return"
+    assert {"Open", "Close", "ret_1", "ret_5", "ema_dist_10", "volatility_regime_code", "target_h48_return"}.issubset(out.columns)
+    assert {"Open", "Close", "ret_1", "ret_5", "ema_dist_10", "volatility_regime_code"}.issubset(feature_cols)
+    assert not out.empty
+
+
+def test_prepare_recurrent_training_frame_accepts_ticker_first_multiindex_ohlcv():
+    frame = _make_recurrent_multiindex_frame("ticker_first")
+
+    out, feature_cols, target_col = prepare_recurrent_training_frame(frame, hold_horizon_bars=48, mode="return")
+
+    assert target_col == "target_h48_return"
+    assert {"Open", "Close", "ret_1", "ret_5", "ema_dist_10", "volatility_regime_code", "target_h48_return"}.issubset(out.columns)
+    assert {"Open", "Close", "ret_1", "ret_5", "ema_dist_10", "volatility_regime_code"}.issubset(feature_cols)
+    assert not out.empty
+
+
 def test_gru_and_lstm_train_pipeline_import_cleanly():
     from marketify.models import train_pipeline
     from scripts import train_recurrent_baseline
@@ -156,6 +223,7 @@ def test_recurrent_report_never_claims_guaranteed_profit():
 
     md = build_recurrent_leaderboard_markdown(df, _make_split_meta(), "skip_high_vol", "return")
 
+    assert "guarantee" not in md.lower()
     assert "guaranteed profit" not in md.lower()
     assert "No profit promise. Outcomes remain uncertain." in md
     assert "baseline comparison: FAIL" in md
