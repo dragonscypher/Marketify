@@ -84,26 +84,35 @@ def _require_torch():
 
 
 def _as_1d_series(frame: pd.DataFrame, col: str) -> pd.Series:
+    import pandas as pd
+
     if isinstance(frame.columns, pd.MultiIndex):
-        candidates = [candidate for candidate in frame.columns if isinstance(candidate, tuple) and col in candidate]
+        candidates = []
+        for candidate in frame.columns:
+            if isinstance(candidate, tuple) and (candidate[0] == col or candidate[-1] == col):
+                candidates.append(candidate)
         if not candidates:
-            raise KeyError(f"Missing {col!r}. Columns={list(frame.columns)[:10]}")
-        values = frame.loc[:, candidates[0]]
+            raise KeyError(f"Missing {col}. Columns={list(frame.columns)[:10]}")
+        data = frame.loc[:, candidates[0]]
     else:
-        values = frame[col]
+        data = frame.loc[:, col]
 
-    if isinstance(values, pd.DataFrame):
-        values = values.iloc[:, 0]
-    values = values.squeeze()
-    if not isinstance(values, pd.Series):
-        values = pd.Series(values, index=frame.index)
-    values = pd.to_numeric(values, errors="coerce")
-    values.index = frame.index
-    values.name = col
+    if isinstance(data, pd.DataFrame):
+        data = data.iloc[:, 0]
 
-    if getattr(values, "ndim", 1) != 1:
-        raise ValueError(f"{col} not 1-D after normalization. shape={getattr(values, 'shape', None)}")
-    return values
+    data = data.squeeze()
+
+    if not isinstance(data, pd.Series):
+        data = pd.Series(data, index=frame.index)
+
+    data = pd.to_numeric(data, errors="coerce")
+    data.index = frame.index
+    data.name = col
+
+    if getattr(data, "ndim", 1) != 1:
+        raise ValueError(f"{col} not 1D after normalization. shape={getattr(data, 'shape', None)}")
+
+    return data
 
 
 def add_volatility_regime_feature(frame: pd.DataFrame) -> pd.DataFrame:
