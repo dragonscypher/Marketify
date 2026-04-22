@@ -17,10 +17,6 @@ from sklearn.linear_model import Ridge
 from sklearn.metrics import mean_absolute_error, mean_squared_error
 
 from marketify.config import AppConfig
-from marketify.data.market_data import fetch_market_data
-from marketify.features.technical import TECHNICAL_FEATURE_COLUMNS, add_technical_features
-from marketify.models.xgb_model import XGBModel
-
 
 ARTIFACT_DIR = Path("artifacts")
 
@@ -30,8 +26,41 @@ def _ensure_dir(path: Path) -> Path:
     return path
 
 
+def _get_technical_feature_columns() -> list[str]:
+    try:
+        from marketify.features.technical import TECHNICAL_FEATURE_COLUMNS
+    except ModuleNotFoundError as exc:
+        if getattr(exc, "name", None) != "ta":
+            raise
+        return [
+            "ret_1",
+            "ret_5",
+            "ret_15",
+            "ema_dist_10",
+            "ema_dist_20",
+            "ema_dist_50",
+            "rsi_14",
+            "macd",
+            "macd_signal",
+            "macd_hist",
+            "atr_14",
+            "vol_20",
+            "sin_hour",
+            "cos_hour",
+            "sin_min",
+            "cos_min",
+            "is_morning",
+            "is_afternoon",
+            "is_late",
+        ]
+    return list(TECHNICAL_FEATURE_COLUMNS)
+
+
 def train_xgb(feat: pd.DataFrame, config: AppConfig) -> dict[str, Any]:
-    x = feat[TECHNICAL_FEATURE_COLUMNS].to_numpy()
+    from marketify.models.xgb_model import XGBModel
+
+    technical_feature_columns = _get_technical_feature_columns()
+    x = feat[technical_feature_columns].to_numpy()
     y = feat["target_next_ret"].to_numpy()
 
     split = int(len(x) * 0.8)
@@ -53,7 +82,8 @@ def train_xgb(feat: pd.DataFrame, config: AppConfig) -> dict[str, Any]:
 
 
 def train_ridge(feat: pd.DataFrame, config: AppConfig) -> dict[str, Any]:
-    x = feat[TECHNICAL_FEATURE_COLUMNS].to_numpy()
+    technical_feature_columns = _get_technical_feature_columns()
+    x = feat[technical_feature_columns].to_numpy()
     y = feat["target_next_ret"].to_numpy()
 
     split = int(len(x) * 0.8)
@@ -74,6 +104,84 @@ def train_ridge(feat: pd.DataFrame, config: AppConfig) -> dict[str, Any]:
     return {"model": "ridge", "ticker": config.data.ticker, "mae": mae, "rmse": rmse, "artifact": str(artifact_path)}
 
 
+def train_recurrent_baselines(
+    feat: pd.DataFrame,
+    config: AppConfig,
+    hold_horizon_bars: int | None = None,
+    label_mode: str = "return",
+) -> list[dict[str, Any]]:
+    """Train GRU/LSTM baselines with horizon-aligned labels.
+
+    Lazy-import torch path so module import stays clean on local machines without
+    recurrent dependencies installed.
+    """
+
+    from marketify.models.rnn_model import (RecurrentModelConfig,
+                                            build_sequence_dataset,
+                                            make_recurrent_model,
+                                            prepare_recurrent_training_frame)
+    from scripts.run_exit_rule_experiment import \
+        split_for_validation_experiment
+
+    if hold_horizon_bars is None:
+        hold_horizon_bars = config.broker.time_stop_bars
+
+    aligned, feature_cols, target_col = prepare_recurrent_training_frame(
+        feat,
+        hold_horizon_bars=hold_horizon_bars,
+        mode=label_mode,
+    )
+    train_val, validation_index, split_meta = split_for_validation_experiment(aligned)
+    train_index = train_val.index[:split_meta.train_end]
+
+    leaderboard: list[dict[str, Any]] = []
+    for architecture in ("gru", "lstm"):
+        model_cfg = RecurrentModelConfig(architecture=architecture)
+        model = make_recurrent_model(architecture, model_cfg)
+        x_train, y_train, _train_ts = build_sequence_dataset(
+            train_val,
+            feature_cols=feature_cols,
+            target_col=target_col,
+            sequence_length=model_cfg.sequence_length,
+            selected_index=train_index,
+        )
+        model.fit(x_train, y_train)
+        x_val, y_val, _val_ts = build_sequence_dataset(
+            train_val,
+            feature_cols=feature_cols,
+            target_col=target_col,
+            sequence_length=model_cfg.sequence_length,
+            selected_index=validation_index,
+        )
+        preds_val = model.predict(x_val)
+        mae = float(mean_absolute_error(y_val, preds_val)) if len(y_val) > 0 else float("nan")
+        rmse = float(np.sqrt(mean_squared_error(y_val, preds_val))) if len(y_val) > 0 else float("nan")
+
+        artifact_path = _ensure_dir(ARTIFACT_DIR) / f"{architecture}_{config.data.ticker}_h{hold_horizon_bars}_{label_mode}.pt"
+        model.save(
+            artifact_path,
+            feature_cols=feature_cols,
+            target_col=target_col,
+            extra_meta={
+                "ticker": config.data.ticker,
+                "hold_horizon_bars": hold_horizon_bars,
+                "label_mode": label_mode,
+            },
+        )
+        leaderboard.append(
+            {
+                "model": architecture,
+                "ticker": config.data.ticker,
+                "mae": mae,
+                "rmse": rmse,
+                "artifact": str(artifact_path),
+            }
+        )
+
+    leaderboard.sort(key=lambda item: item["mae"])
+    return leaderboard
+
+
 def train_if_missing(config: AppConfig | None = None, force: bool = False) -> list[dict[str, Any]]:
     """Train all models if artifacts missing (or force=True). Return leaderboard."""
     if config is None:
@@ -86,12 +194,16 @@ def train_if_missing(config: AppConfig | None = None, force: bool = False) -> li
     if not force and xgb_path.exists() and ridge_path.exists():
         return _load_leaderboard(ticker)
 
+    from marketify.data.market_data import fetch_market_data
+
     raw = fetch_market_data(
         ticker=ticker,
         interval=config.data.interval,
         period=config.data.period,
         prepost=config.data.prepost,
     )
+    from marketify.features.technical import add_technical_features
+
     feat = add_technical_features(raw)
 
     leaderboard: list[dict[str, Any]] = []
