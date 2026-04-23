@@ -83,17 +83,12 @@ def _require_torch():
     return torch, nn, DataLoader, TensorDataset
 
 
-def _as_1d_series(frame: pd.DataFrame, col: str) -> pd.Series:
+def _flat_series(frame: pd.DataFrame, col: str) -> pd.Series:
     import pandas as pd
 
-    if isinstance(frame.columns, pd.MultiIndex):
-        candidates = []
-        for candidate in frame.columns:
-            if isinstance(candidate, tuple) and (candidate[0] == col or candidate[-1] == col):
-                candidates.append(candidate)
-        if not candidates:
-            raise KeyError(f"Missing {col}. Columns={list(frame.columns)[:10]}")
-        data = frame.loc[:, candidates[0]]
+    matches = [candidate for candidate in frame.columns if isinstance(candidate, tuple) and (candidate[0] == col or candidate[-1] == col)]
+    if matches:
+        data = frame[matches[0]]
     else:
         data = frame.loc[:, col]
 
@@ -110,7 +105,7 @@ def _as_1d_series(frame: pd.DataFrame, col: str) -> pd.Series:
     data.name = col
 
     if getattr(data, "ndim", 1) != 1:
-        raise ValueError(f"{col} not 1D after normalization. shape={getattr(data, 'shape', None)}")
+        raise ValueError(f"{col} not 1D. shape={getattr(data, 'shape', None)}")
 
     return data
 
@@ -118,33 +113,19 @@ def _as_1d_series(frame: pd.DataFrame, col: str) -> pd.Series:
 def _flatten_recurrent_frame(frame: pd.DataFrame) -> pd.DataFrame:
     import pandas as pd
 
-    try:
-        from marketify.features.technical import _as_1d_series as technical_as_1d_series
-    except ModuleNotFoundError as exc:
-        if getattr(exc, "name", None) != "ta":
-            raise
-        technical_as_1d_series = _as_1d_series
-
-    required_ohlcv = ["Open", "High", "Low", "Close", "Volume"]
     out = pd.DataFrame(index=frame.index)
 
-    for col in required_ohlcv:
-        out[col] = technical_as_1d_series(frame, col)
+    for col in ["Open", "High", "Low", "Close", "Volume"]:
+        out[col] = _flat_series(frame, col)
 
     for col in frame.columns:
         if isinstance(col, str) and col not in out.columns:
             data = frame[col]
             if isinstance(data, pd.DataFrame):
                 data = data.iloc[:, 0]
-            out[col] = pd.to_numeric(data, errors="coerce")
-
-    for col in TECHNICAL_FEATURE_COLUMNS:
-        if col in out.columns:
-            continue
-        try:
-            out[col] = _as_1d_series(frame, col)
-        except KeyError:
-            continue
+            data = data.squeeze()
+            if isinstance(data, pd.Series):
+                out[col] = pd.to_numeric(data, errors="coerce")
 
     return out
 
@@ -187,7 +168,7 @@ def build_aligned_labels(
     if mode not in {"return", "direction"}:
         raise ValueError("mode must be 'return' or 'direction'")
 
-    price = _as_1d_series(frame, price_col)
+    price = _flat_series(frame, price_col)
     future_return = price.shift(-hold_horizon_bars) / price - 1.0
     column_name = f"target_h{hold_horizon_bars}_{mode}"
     if mode == "direction":
@@ -215,13 +196,20 @@ def prepare_recurrent_training_frame(
     hold_horizon_bars: int,
     mode: RecurrentLabelMode = "return",
 ) -> tuple[pd.DataFrame, list[str], str]:
-    out, feature_cols = build_recurrent_feature_frame(frame)
-    target = build_aligned_labels(out, hold_horizon_bars=hold_horizon_bars, mode=mode, price_col="Close")
+    out = _flatten_recurrent_frame(frame)
+    out = add_volatility_regime_feature(out)
+    feature_cols = [col for col in [*OHLCV_COLUMNS, *TECHNICAL_FEATURE_COLUMNS, VOLATILITY_REGIME_CODE_COLUMN] if col in out.columns]
+    if feature_cols:
+        out[feature_cols] = out[feature_cols].apply(pd.to_numeric, errors="coerce")
+    out = out.replace([np.inf, -np.inf], np.nan)
+
+    target = build_aligned_labels(out, hold_horizon_bars=hold_horizon_bars, mode=mode)
     out[target.name] = target
-    missing = [col for col in [*feature_cols, target.name] if col not in out.columns]
+    required = [*feature_cols, target.name]
+    missing = [col for col in required if col not in out.columns]
     if missing:
-        raise KeyError(f"Missing recurrent columns after flatten: {missing}. columns={list(out.columns)[:50]}")
-    out = out.dropna(subset=[*feature_cols, target.name]).copy()
+        raise KeyError(f"Missing recurrent columns after flatten: {missing}. columns={list(out.columns)[:80]}")
+    out = out.dropna(subset=required).copy()
     return out, feature_cols, target.name
 
 

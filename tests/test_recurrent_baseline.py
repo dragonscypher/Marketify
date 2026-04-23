@@ -6,8 +6,8 @@ import pytest
 
 from marketify.models.rnn_model import (TECHNICAL_FEATURE_COLUMNS,
                                         build_aligned_labels,
-                                        prepare_recurrent_training_frame,
-                                        make_recurrent_model)
+                                        make_recurrent_model,
+                                        prepare_recurrent_training_frame)
 from scripts.compare_models import (build_recurrent_leaderboard_markdown,
                                     prepare_validation_only_data)
 from scripts.run_exit_rule_experiment import ValidationSplitMeta
@@ -77,14 +77,13 @@ def _make_recurrent_multiindex_frame(order: str, rows: int = 96) -> pd.DataFrame
         "is_late": np.where(np.arange(rows) % 3 == 2, 1.0, 0.0),
     }
 
-    columns: dict[tuple[str, str], np.ndarray] = {}
+    columns: dict[object, np.ndarray] = {}
     ticker = "AAPL"
     for name, values in base.items():
         key = (name, ticker) if order == "field_first" else (ticker, name)
         columns[key] = values
     for name, values in engineered.items():
-        key = (name, ticker) if order == "field_first" else (ticker, name)
-        columns[key] = values
+        columns[name] = values
 
     return pd.DataFrame(columns, index=idx)
 
