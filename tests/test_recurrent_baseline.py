@@ -1,13 +1,14 @@
 from __future__ import annotations
 
 from dataclasses import asdict
+
 import numpy as np
 import pandas as pd
 import pytest
 
 from marketify.models.rnn_model import (TECHNICAL_FEATURE_COLUMNS,
-                                        load_recurrent_artifact,
                                         build_aligned_labels,
+                                        load_recurrent_artifact,
                                         make_recurrent_model,
                                         prepare_recurrent_training_frame)
 from scripts.compare_models import (build_recurrent_leaderboard_markdown,
@@ -130,6 +131,56 @@ def test_build_aligned_labels_handles_ticker_first_multiindex_close():
 
 
 def test_build_aligned_labels_handles_duplicate_flat_close_columns():
+    idx = _make_close_index()
+    frame = pd.DataFrame(
+        np.array(
+            [
+                [100.0, 100.0],
+                [105.0, 105.0],
+                [110.0, 110.0],
+                [115.0, 115.0],
+                [120.0, 120.0],
+            ]
+        ),
+        index=idx,
+        columns=["Close", "Close"],
+    )
+
+    labels = build_aligned_labels(frame, hold_horizon_bars=2, mode="return")
+
+    _assert_h2_return(labels)
+
+
+def test_build_aligned_labels_handles_normal_close_series():
+    idx = _make_close_index()
+    frame = pd.DataFrame({"Close": pd.Series([100.0, 105.0, 110.0, 115.0, 120.0], index=idx)}, index=idx)
+
+    labels = build_aligned_labels(frame, hold_horizon_bars=2, mode="return")
+
+    _assert_h2_return(labels)
+
+
+def test_build_aligned_labels_handles_field_first_multiindex_close_column():
+    idx = _make_close_index()
+    columns = pd.MultiIndex.from_tuples([("Close", "AAPL")])
+    frame = pd.DataFrame([[100.0], [105.0], [110.0], [115.0], [120.0]], index=idx, columns=columns)
+
+    labels = build_aligned_labels(frame, hold_horizon_bars=2, mode="return")
+
+    _assert_h2_return(labels)
+
+
+def test_build_aligned_labels_handles_ticker_first_multiindex_close_column():
+    idx = _make_close_index()
+    columns = pd.MultiIndex.from_tuples([("AAPL", "Close")])
+    frame = pd.DataFrame([[100.0], [105.0], [110.0], [115.0], [120.0]], index=idx, columns=columns)
+
+    labels = build_aligned_labels(frame, hold_horizon_bars=2, mode="return")
+
+    _assert_h2_return(labels)
+
+
+def test_build_aligned_labels_handles_duplicate_flat_close_frame():
     idx = _make_close_index()
     frame = pd.DataFrame(
         np.array(

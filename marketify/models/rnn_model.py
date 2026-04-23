@@ -83,12 +83,17 @@ def _require_torch():
     return torch, nn, DataLoader, TensorDataset
 
 
-def _flat_series(frame: pd.DataFrame, col: str) -> pd.Series:
+def _as_1d_series(frame: pd.DataFrame, col: str) -> pd.Series:
     import pandas as pd
 
-    matches = [candidate for candidate in frame.columns if isinstance(candidate, tuple) and (candidate[0] == col or candidate[-1] == col)]
-    if matches:
-        data = frame[matches[0]]
+    if isinstance(frame.columns, pd.MultiIndex):
+        candidates = []
+        for candidate in frame.columns:
+            if isinstance(candidate, tuple) and (candidate[0] == col or candidate[-1] == col):
+                candidates.append(candidate)
+        if not candidates:
+            raise KeyError(f"Missing {col}. Columns={list(frame.columns)[:10]}")
+        data = frame.loc[:, candidates[0]]
     else:
         data = frame.loc[:, col]
 
@@ -105,9 +110,13 @@ def _flat_series(frame: pd.DataFrame, col: str) -> pd.Series:
     data.name = col
 
     if getattr(data, "ndim", 1) != 1:
-        raise ValueError(f"{col} not 1D. shape={getattr(data, 'shape', None)}")
+        raise ValueError(f"{col} not 1D after normalization. shape={getattr(data, 'shape', None)}")
 
     return data
+
+
+def _flat_series(frame: pd.DataFrame, col: str) -> pd.Series:
+    return _as_1d_series(frame, col)
 
 
 def _flatten_recurrent_frame(frame: pd.DataFrame) -> pd.DataFrame:
@@ -176,7 +185,7 @@ def build_aligned_labels(
     if mode not in {"return", "direction"}:
         raise ValueError("mode must be 'return' or 'direction'")
 
-    price = _flat_series(frame, price_col)
+    price = _as_1d_series(frame, price_col)
     future_return = price.shift(-hold_horizon_bars) / price - 1.0
     column_name = f"target_h{hold_horizon_bars}_{mode}"
     if mode == "direction":
