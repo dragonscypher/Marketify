@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+from dataclasses import asdict
 import numpy as np
 import pandas as pd
 import pytest
 
 from marketify.models.rnn_model import (TECHNICAL_FEATURE_COLUMNS,
+                                        load_recurrent_artifact,
                                         build_aligned_labels,
                                         make_recurrent_model,
                                         prepare_recurrent_training_frame)
@@ -181,6 +183,64 @@ def test_gru_and_lstm_train_pipeline_import_cleanly():
     assert hasattr(train_recurrent_baseline, "main")
     assert gru.architecture == "gru"
     assert lstm.architecture == "lstm"
+
+
+def test_load_recurrent_artifact_sets_weights_only_false(monkeypatch, tmp_path):
+    calls: dict[str, object] = {}
+    payload = {
+        "architecture": "gru",
+        "config": asdict(make_recurrent_model("gru").config),
+        "input_size": 3,
+        "state_dict": {},
+        "standardizer_mean": np.array([0.1, 0.2, 0.3], dtype=np.float32),
+        "standardizer_std": np.array([1.0, 1.0, 1.0], dtype=np.float32),
+    }
+
+    class DummyTorch:
+        def load(self, artifact_path, map_location=None, weights_only=None):
+            calls["artifact_path"] = artifact_path
+            calls["map_location"] = map_location
+            calls["weights_only"] = weights_only
+            return payload
+
+    monkeypatch.setattr("marketify.models.rnn_model._require_torch", lambda: (DummyTorch(), None, None, None))
+
+    model, loaded = load_recurrent_artifact(tmp_path / "recurrent.pt")
+
+    assert calls["map_location"] == "cpu"
+    assert calls["weights_only"] is False
+    assert model.architecture == "gru"
+    assert loaded is payload
+
+
+def test_load_recurrent_artifact_falls_back_without_weights_only(monkeypatch, tmp_path):
+    calls: dict[str, object] = {"count": 0}
+    payload = {
+        "architecture": "lstm",
+        "config": asdict(make_recurrent_model("lstm").config),
+        "input_size": 2,
+        "state_dict": {},
+        "standardizer_mean": np.array([0.1, 0.2], dtype=np.float32),
+        "standardizer_std": np.array([1.0, 1.0], dtype=np.float32),
+    }
+
+    class DummyTorch:
+        def load(self, artifact_path, map_location=None, **kwargs):
+            calls["count"] = int(calls["count"]) + 1
+            if "weights_only" in kwargs:
+                raise TypeError("unexpected keyword argument 'weights_only'")
+            calls["artifact_path"] = artifact_path
+            calls["map_location"] = map_location
+            return payload
+
+    monkeypatch.setattr("marketify.models.rnn_model._require_torch", lambda: (DummyTorch(), None, None, None))
+
+    model, loaded = load_recurrent_artifact(tmp_path / "legacy.pt")
+
+    assert calls["count"] == 2
+    assert calls["map_location"] == "cpu"
+    assert model.architecture == "lstm"
+    assert loaded is payload
 
 
 def test_compare_models_does_not_touch_final_test_split():

@@ -395,7 +395,10 @@ def make_recurrent_model(
 
 def load_recurrent_artifact(artifact_path: Path) -> tuple[_RecurrentHead, dict[str, Any]]:
     torch, _nn, _DataLoader, _TensorDataset = _require_torch()
-    payload = torch.load(artifact_path, map_location="cpu")
+    try:
+        payload = torch.load(artifact_path, map_location="cpu", weights_only=False)
+    except TypeError:
+        payload = torch.load(artifact_path, map_location="cpu")
     architecture = str(payload["architecture"])
     config = RecurrentModelConfig(**payload["config"])
     model = make_recurrent_model(architecture, config)
