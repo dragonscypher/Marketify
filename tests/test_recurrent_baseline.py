@@ -45,7 +45,7 @@ def _make_close_index() -> pd.DatetimeIndex:
     return pd.date_range("2026-01-01", periods=5, freq="5min")
 
 
-def _make_recurrent_multiindex_frame(order: str, rows: int = 96) -> pd.DataFrame:
+def _make_recurrent_multiindex_frame(order: str, rows: int = 96, engineered_as_tuples: bool = False) -> pd.DataFrame:
     idx = pd.date_range("2026-01-01", periods=rows, freq="5min")
     base = {
         "Open": 100.0 + np.arange(rows) * 0.05,
@@ -83,7 +83,11 @@ def _make_recurrent_multiindex_frame(order: str, rows: int = 96) -> pd.DataFrame
         key = (name, ticker) if order == "field_first" else (ticker, name)
         columns[key] = values
     for name, values in engineered.items():
-        columns[name] = values
+        if engineered_as_tuples:
+            key = (name, ticker) if order == "field_first" else (ticker, name)
+            columns[key] = values
+        else:
+            columns[name] = values
 
     return pd.DataFrame(columns, index=idx)
 
@@ -145,7 +149,7 @@ def test_build_aligned_labels_handles_duplicate_flat_close_columns():
 
 
 def test_prepare_recurrent_training_frame_accepts_field_first_multiindex_ohlcv():
-    frame = _make_recurrent_multiindex_frame("field_first")
+    frame = _make_recurrent_multiindex_frame("field_first", engineered_as_tuples=True)
 
     out, feature_cols, target_col = prepare_recurrent_training_frame(frame, hold_horizon_bars=48, mode="return")
 
@@ -156,7 +160,7 @@ def test_prepare_recurrent_training_frame_accepts_field_first_multiindex_ohlcv()
 
 
 def test_prepare_recurrent_training_frame_accepts_ticker_first_multiindex_ohlcv():
-    frame = _make_recurrent_multiindex_frame("ticker_first")
+    frame = _make_recurrent_multiindex_frame("ticker_first", engineered_as_tuples=True)
 
     out, feature_cols, target_col = prepare_recurrent_training_frame(frame, hold_horizon_bars=48, mode="return")
 

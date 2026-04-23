@@ -127,6 +127,14 @@ def _flatten_recurrent_frame(frame: pd.DataFrame) -> pd.DataFrame:
             if isinstance(data, pd.Series):
                 out[col] = pd.to_numeric(data, errors="coerce")
 
+    for col in TECHNICAL_FEATURE_COLUMNS:
+        if col in out.columns:
+            continue
+        try:
+            out[col] = _flat_series(frame, col)
+        except KeyError:
+            continue
+
     return out
 
 
