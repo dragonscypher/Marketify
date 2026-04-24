@@ -116,23 +116,27 @@ def step_benchmark() -> int:
             for i in range(7)
         ]
         result = compute_benchmark(history, weekly_goal=0.01)
+        status = "PASS" if result.weekly_pass else "FAIL"
         report = {
             "source": "synthetic_smoke_test",
             "synthetic": True,
-            "weekly_return": result.weekly_return,
+            "status": status,
+            "weekly_return_pct": round(result.weekly_return * 100, 4),
+            "daily_return_pct": round(result.daily_return * 100, 4),
+            "max_drawdown_pct": round(result.max_drawdown * 100, 4),
+            "cvar_95_pct": round(result.cvar_95 * 100, 4),
+            "trade_count": 0,
             "weekly_pass": result.weekly_pass,
-            "max_drawdown": result.max_drawdown,
             "drawdown_pass": result.drawdown_pass,
-            "sharpe_ratio": result.sharpe_ratio,
+            "sharpe_ratio": round(result.sharpe_ratio, 4),
             "sharpe_pass": result.sharpe_pass,
         }
         _ensure_dir(REPORTS)
         with open(REPORTS / "smoke_benchmark_report.json", "w") as f:
             json.dump(report, f, indent=2)
 
-        status = "PASS" if result.weekly_pass else "FAIL"
-        print(f"[SYNTHETIC] Weekly return: {result.weekly_return:.4%} → {status}")
-        print(f"[SYNTHETIC] Sharpe ratio:  {result.sharpe_ratio:.3f}")
+        print(f"[SYNTHETIC] Weekly return: {report['weekly_return_pct']:.4f}% → {status}")
+        print(f"[SYNTHETIC] Sharpe ratio:  {report['sharpe_ratio']:.3f}")
         print("[NOTE] This is synthetic data. Not real profit.")
         return 0
     except Exception as e:
@@ -166,6 +170,7 @@ def generate_next_status(
     benchmark_status: str,
     tuning_status: str,
     strategy_analysis_status: str = "UNKNOWN",
+    smoke_status: str | None = None,
 ) -> Path:
     _ensure_dir(REPORTS)
     path = REPORTS / "NEXT_STATUS.md"
@@ -192,11 +197,14 @@ def generate_next_status(
     runtime_fail = any(v != 0 for k, v in results.items() if k in RUNTIME_STEPS)
     runtime_status = "FAIL" if runtime_fail else "PASS"
 
-    all_pass = all(v == 0 for v in results.values())
+    if smoke_status is None:
+        smoke_status = _read_smoke_benchmark_status()
+
     lines = [
         "# NEXT_STATUS — Marketify Paper Engine",
         f"**Generated:** {ts}",
         f"- Runtime Status: {runtime_status}",
+        f"- Smoke Benchmark Status: {smoke_status}",
         f"- Real Benchmark Status: {benchmark_status}",
         f"- Tuning Status: {tuning_status}",
         f"- Strategy Analysis Status: {strategy_analysis_status}",
@@ -220,27 +228,49 @@ def generate_next_status(
         tag = "PASS" if code == 0 else "FAIL"
         lines.append(f"| {step} | {code} | {tag} |")
 
+    smoke_report = _read_report(REPORTS / "smoke_benchmark_report.json")
+    if smoke_report:
+        lines.append("")
+        lines.append("## Smoke Benchmark")
+        lines.append(f"- Source: {smoke_report.get('source', 'unknown')}")
+        lines.append(f"- Synthetic: {smoke_report.get('synthetic', 'unknown')}")
+        lines.append(f"- Status: {smoke_status}")
+        lines.append(f"- Weekly return: {smoke_report.get('weekly_return_pct', 0)}%")
+        lines.append(f"- Daily return: {smoke_report.get('daily_return_pct', 0)}%")
+        lines.append(f"- Max drawdown: {smoke_report.get('max_drawdown_pct', 0)}%")
+        lines.append(f"- Sharpe ratio: {smoke_report.get('sharpe_ratio', 0)}")
+        lines.append(f"- CVaR 5%: {smoke_report.get('cvar_95_pct', 0)}%")
+        lines.append("- Purpose: smoke check only. Not real profit.")
+
     # Append real benchmark detail if available
-    rb_path = REPORTS / "real_benchmark.json"
-    if rb_path.exists():
+    real_report = _read_report(REPORTS / "real_benchmark.json")
+    if real_report:
         try:
-            with open(rb_path) as f:
-                rb = json.load(f)
             lines.append("")
             lines.append("## Real Benchmark")
-            lines.append(f"- Source: {rb.get('source', 'unknown')}")
-            lines.append(f"- Synthetic: {rb.get('synthetic', 'unknown')}")
+            lines.append(f"- Source: {real_report.get('source', 'unknown')}")
+            lines.append(f"- Synthetic: {real_report.get('synthetic', 'unknown')}")
             lines.append(f"- Status: {benchmark_status}")
-            lines.append(f"- Weekly return: {rb.get('weekly_return_pct', 0)}%  (target: 1%)")
-            lines.append(f"- Daily return: {rb.get('daily_return_pct', 0)}%")
-            lines.append(f"- Max drawdown: {rb.get('max_drawdown_pct', 0)}%")
-            lines.append(f"- Sharpe ratio: {rb.get('sharpe_ratio', 0)}")
-            lines.append(f"- CVaR 5%: {rb.get('cvar_95_pct', 0)}%")
-            lines.append(f"- Trade count: {rb.get('trade_count', 0)}")
+            lines.append(
+                f"- Weekly return: {real_report.get('weekly_return_pct', 0)}%  "
+                f"(target: {real_report.get('target_weekly_return_pct', 1.0)}%)"
+            )
+            lines.append(f"- Daily return: {real_report.get('daily_return_pct', 0)}%")
+            lines.append(f"- Max drawdown: {real_report.get('max_drawdown_pct', 0)}%")
+            lines.append(f"- Sharpe ratio: {real_report.get('sharpe_ratio', 0)}")
+            lines.append(f"- CVaR 5%: {real_report.get('cvar_95_pct', 0)}%")
+            lines.append(f"- Trade count: {real_report.get('trade_count', 0)}")
+            if real_report.get("reason"):
+                lines.append(f"- Reason: {real_report['reason']}")
             if benchmark_status == "FAIL":
                 lines.append("")
-                lines.append(f"**Reason for FAIL:** weekly return {rb.get('weekly_return_pct', 0)}% < 1% target.")
+                lines.append(
+                    f"**Reason for FAIL:** weekly return {real_report.get('weekly_return_pct', 0)}% "
+                    f"< {real_report.get('target_weekly_return_pct', 1.0)}% target."
+                )
                 lines.append("Strategy underperformed. No runtime error. Tuning required.")
+            if benchmark_status == "FAIL_NO_TRADES":
+                lines.append("- Honest outcome: no real trades, no synthetic replacement.")
         except Exception:
             pass
 
@@ -322,6 +352,7 @@ def main() -> int:
     results["validation"] = step_validation()
     results["training"] = step_training()
     results["smoke_benchmark"] = step_benchmark()
+    smoke_status = _read_smoke_benchmark_status()
 
     # Benchmark — FAIL = strategy result, not crash; never exits nonzero for this
     rb_code = step_real_benchmark()
@@ -353,11 +384,12 @@ def main() -> int:
     if benchmark_status not in {"PASS", "FAIL", "FAIL_NO_TRADES"}:
         runtime_ok = False
 
-    generate_next_status(results, benchmark_status, tuning_status, strategy_analysis_status)
+    generate_next_status(results, benchmark_status, tuning_status, strategy_analysis_status, smoke_status)
 
     runtime_status = "PASS" if runtime_ok else "FAIL"
     print(f"\n{'='*60}")
     print(f"RUNTIME:          {runtime_status}")
+    print(f"SMOKE_BENCHMARK:  {smoke_status}")
     print(f"REAL_BENCHMARK:   {benchmark_status}")
     print(f"TUNING:           {tuning_status}")
     print(f"{'='*60}")
@@ -376,6 +408,21 @@ def _read_benchmark_status() -> str:
         return rb.get("status", "UNKNOWN")
     except Exception:
         return "UNKNOWN"
+
+
+def _read_smoke_benchmark_status() -> str:
+    report = _read_report(REPORTS / "smoke_benchmark_report.json")
+    if not report:
+        return "UNKNOWN"
+    return str(report.get("status", "UNKNOWN"))
+
+
+def _read_report(path: Path) -> dict[str, object]:
+    try:
+        with open(path) as f:
+            return json.load(f)
+    except Exception:
+        return {}
 
 
 def _tuning_reports_exist() -> bool:
