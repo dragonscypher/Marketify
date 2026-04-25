@@ -342,3 +342,107 @@ def test_recurrent_report_never_claims_guaranteed_profit():
     assert "No profit promise. Outcomes remain uncertain." in md
     assert "baseline comparison: FAIL" in md
     assert "Paper mode only. No leverage increase used." in md
+
+
+def test_xgb_real_leaderboard_keeps_xgb_primary():
+    import scripts.compare_models as cm
+
+    rows = pd.DataFrame(
+        [
+            asdict(
+                cm.RealBenchmarkRow(
+                    model_name="xgb",
+                    role="champion",
+                    weekly_return_pct=0.6977,
+                    sharpe=1.2268,
+                    max_drawdown_pct=0.1933,
+                    cvar_95_pct=0.0500,
+                    trade_count=10,
+                    win_rate_pct=60.0,
+                    expectancy=1.0,
+                    weekly_target_pass=False,
+                    comparison_only=False,
+                    run_status="COMPLETE",
+                    gate_block_count=12,
+                    gate_keep_ratio_pct=44.0,
+                    top_blocker="below_cost_buffer",
+                    notes="primary real benchmark lane",
+                )
+            ),
+            asdict(
+                cm.RealBenchmarkRow(
+                    model_name="lstm",
+                    role="comparison",
+                    weekly_return_pct=float("nan"),
+                    sharpe=float("nan"),
+                    max_drawdown_pct=float("nan"),
+                    cvar_95_pct=float("nan"),
+                    trade_count=0,
+                    win_rate_pct=float("nan"),
+                    expectancy=float("nan"),
+                    weekly_target_pass=False,
+                    comparison_only=True,
+                    run_status="FROZEN",
+                    gate_block_count=0,
+                    gate_keep_ratio_pct=0.0,
+                    top_blocker="comparison_only",
+                    notes="comparison only; frozen off primary path",
+                )
+            ),
+        ]
+    )
+
+    champion = cm.RealBenchmarkRow(
+        model_name="xgb",
+        role="champion",
+        weekly_return_pct=0.6977,
+        sharpe=1.2268,
+        max_drawdown_pct=0.1933,
+        cvar_95_pct=0.0500,
+        trade_count=10,
+        win_rate_pct=60.0,
+        expectancy=1.0,
+        weekly_target_pass=False,
+        comparison_only=False,
+        run_status="COMPLETE",
+        gate_block_count=12,
+        gate_keep_ratio_pct=44.0,
+        top_blocker="below_cost_buffer",
+        notes="primary real benchmark lane",
+    )
+
+    md = cm.build_xgb_real_leaderboard_markdown(rows, champion)
+
+    assert "current_champion: xgb" in md
+    assert "GRU/LSTM comparison only. Not eligible as champion here." in md
+    assert "comparison only; frozen off primary path" in md
+
+
+def test_next_status_reports_exact_fail_gap_for_xgb_real_path():
+    import scripts.compare_models as cm
+
+    champion = cm.RealBenchmarkRow(
+        model_name="xgb",
+        role="champion",
+        weekly_return_pct=0.6977,
+        sharpe=1.2268,
+        max_drawdown_pct=0.1933,
+        cvar_95_pct=0.0500,
+        trade_count=10,
+        win_rate_pct=60.0,
+        expectancy=1.0,
+        weekly_target_pass=False,
+        comparison_only=False,
+        run_status="COMPLETE",
+        gate_block_count=12,
+        gate_keep_ratio_pct=44.0,
+        top_blocker="below_cost_buffer",
+        notes="primary real benchmark lane",
+    )
+
+    md = cm.build_next_status_markdown(champion)
+
+    assert "current champion: xgb" in md
+    assert "gap to 1.0% target: 0.3023 percentage points" in md
+    assert "result: FAIL" in md
+    assert "dominant_gate=below_cost_buffer" in md

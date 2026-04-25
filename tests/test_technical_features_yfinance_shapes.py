@@ -7,7 +7,23 @@ import pytest
 
 from marketify.features.technical import add_technical_features
 
-EXPECTED_COLS = ["ema_10", "ema_20", "rsi_14", "macd", "macd_signal", "atr_14", "vol_20"]
+EXPECTED_COLS = [
+    "ema_10",
+    "ema_20",
+    "rsi_14",
+    "macd",
+    "macd_signal",
+    "atr_14",
+    "atr_pct",
+    "vol_20",
+    "ret_30",
+    "volume_regime_ratio",
+    "breakout_up_20",
+    "breakout_down_20",
+    "news_headline_count",
+    "vix_proxy",
+    "macro_regime_neutral",
+]
 
 
 def _base_ohlcv(rows: int = 200):
