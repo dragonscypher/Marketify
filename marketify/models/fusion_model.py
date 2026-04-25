@@ -48,9 +48,11 @@ class FusionConfig:
     """Deterministic policy thresholds.  All values are fixed at construction."""
     min_confidence: float = 0.30      # below → abstain
     min_expected_return: float = 3e-4  # below |return| → abstain (cost threshold)
+    abstain_margin: float = 0.0        # extra edge buffer above cost threshold
     max_cvar_95: float = 0.02          # above → risk_flag
     max_news_risk: float = 0.75        # above → risk_flag + abstain
     high_vol_vix_threshold: float = 30.0  # VIX proxy above → risk_flag
+    max_model_disagreement: float = 0.006  # tabular vs recurrent disagreement gate
 
 
 class FusionPredictor:
@@ -71,6 +73,7 @@ class FusionPredictor:
         cvar_95: float = 0.0,
         news_risk: float = 0.0,
         vix_proxy: float = 20.0,
+        model_disagreement: float | None = None,
     ) -> FusionScore:
         """Compute fused score and apply deterministic policy gates.
 
@@ -84,23 +87,28 @@ class FusionPredictor:
         )
 
         # 2. Confidence: normalised magnitude clamped to [0, 1].
-        scale = max(self.config.min_expected_return, 1e-6)
+        edge_floor = self.config.min_expected_return + self.config.abstain_margin
+        scale = max(edge_floor, 1e-6)
         confidence = float(np.clip(abs(raw) / scale, 0.0, 1.0))
 
         # 3. Risk flags (deterministic).
         cvar_flag = float(cvar_95) > self.config.max_cvar_95
         news_flag = float(news_risk) > self.config.max_news_risk
         regime_flag = float(vix_proxy) > self.config.high_vol_vix_threshold
+        disagreement = abs(float(tabular_score) - float(sequence_score))
+        if model_disagreement is not None:
+            disagreement = float(model_disagreement)
+        disagreement_flag = disagreement > self.config.max_model_disagreement
         risk_flag = cvar_flag or news_flag or regime_flag
 
         # 4. Abstain decision.
-        weak_edge = abs(raw) < self.config.min_expected_return
+        weak_edge = abs(raw) <= edge_floor
         low_confidence = confidence < self.config.min_confidence
-        abstain_flag = weak_edge or low_confidence or news_flag
+        abstain_flag = weak_edge or low_confidence or news_flag or regime_flag or disagreement_flag
 
         reasons: list[str] = []
         if weak_edge:
-            reasons.append(f"weak_edge(|{raw:.5f}|<{self.config.min_expected_return})")
+            reasons.append(f"weak_edge(|{raw:.5f}|<={edge_floor:.5f})")
         if low_confidence:
             reasons.append(f"low_conf({confidence:.3f}<{self.config.min_confidence})")
         if news_flag:
@@ -109,6 +117,10 @@ class FusionPredictor:
             reasons.append(f"cvar_gate({cvar_95:.4f}>{self.config.max_cvar_95})")
         if regime_flag:
             reasons.append(f"regime(vix={vix_proxy:.1f}>{self.config.high_vol_vix_threshold})")
+        if disagreement_flag:
+            reasons.append(
+                f"disagreement({disagreement:.5f}>{self.config.max_model_disagreement:.5f})"
+            )
 
         return FusionScore(
             expected_return=float(raw),
@@ -143,12 +155,6 @@ def rolling_train_predict(
     from marketify.models.rnn_model import rolling_train_predict as _gru_rtp
     from marketify.models.xgb_model import rolling_train_predict as _xgb_rtp
 
-    f_cfg = fusion_config or FusionConfig(
-        min_expected_return=getattr(config, "rnn_seq_len", 20) * 0.0  # keep default
-    )
-    f_cfg = fusion_config or FusionConfig()
-    predictor = FusionPredictor(f_cfg)
-
     # --- tabular lane ---
     tabular_preds = _xgb_rtp(frame, feature_cols, target_col, config)
 
@@ -158,10 +164,48 @@ def rolling_train_predict(
     except Exception:
         seq_preds = pd.Series(0.0, index=frame.index, name="pred_next_ret")
 
+    return fuse_prediction_components(
+        frame=frame,
+        tabular_preds=tabular_preds,
+        sequence_preds=seq_preds,
+        fusion_config=fusion_config,
+    )
+
+
+def fuse_prediction_components(
+    frame: pd.DataFrame,
+    tabular_preds: pd.Series,
+    sequence_preds: pd.Series,
+    fusion_config: FusionConfig | None = None,
+) -> pd.Series:
+    """Fuse cached tabular + recurrent predictions under deterministic policy rules."""
+    f_cfg = fusion_config or FusionConfig()
+    predictor = FusionPredictor(f_cfg)
+
     # Align indices
     tab = tabular_preds.reindex(frame.index)
-    seq = seq_preds.reindex(frame.index).fillna(0.0)
-    sent = pd.Series(0.0, index=frame.index)  # neutral: no live feed
+    seq = sequence_preds.reindex(frame.index).fillna(0.0)
+    sent = (
+        pd.to_numeric(frame["news_sentiment_score"], errors="coerce").reindex(frame.index).fillna(0.0)
+        if "news_sentiment_score" in frame.columns
+        else pd.Series(0.0, index=frame.index)
+    )
+    news_risk = (
+        pd.to_numeric(frame["news_risk"], errors="coerce").reindex(frame.index).fillna(0.0)
+        if "news_risk" in frame.columns
+        else pd.Series(0.0, index=frame.index)
+    )
+    if "news_event_shock" in frame.columns:
+        shock = pd.to_numeric(frame["news_event_shock"], errors="coerce").reindex(frame.index).fillna(0.0)
+        news_risk = pd.Series(np.maximum(news_risk.to_numpy(), shock.to_numpy()), index=frame.index)
+    if "vix_proxy" in frame.columns:
+        vix_proxy = pd.to_numeric(frame["vix_proxy"], errors="coerce").reindex(frame.index).fillna(20.0)
+    elif "vol_20" in frame.columns:
+        # Deterministic local proxy for regime stress from realized vol.
+        vix_proxy = pd.to_numeric(frame["vol_20"], errors="coerce").reindex(frame.index).fillna(0.0) * 1000.0
+    else:
+        vix_proxy = pd.Series(20.0, index=frame.index)
+    disagreement = (tab.fillna(0.0) - seq.fillna(0.0)).abs()
 
     fused = np.full(len(frame), np.nan, dtype=float)
     for i, ts in enumerate(frame.index):
@@ -174,6 +218,9 @@ def rolling_train_predict(
             tabular_score=t_val,
             sequence_score=s_val,
             sentiment_score=snt,
+            news_risk=float(news_risk.iloc[i]),
+            vix_proxy=float(vix_proxy.iloc[i]),
+            model_disagreement=float(disagreement.iloc[i]),
         )
         if fs.abstain_flag:
             fused[i] = np.nan  # abstain → no trade this bar

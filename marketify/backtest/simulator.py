@@ -14,6 +14,7 @@ from marketify.features.technical import (TECHNICAL_FEATURE_COLUMNS,
                                           add_technical_features)
 from marketify.models.ensemble import (TradeIdeaInput, build_trade_idea,
                                        compute_cvar_95)
+from marketify.models.fusion_model import FusionConfig
 from marketify.models.fusion_model import \
     rolling_train_predict as rolling_train_predict_fusion
 from marketify.models.ridge_model import \
@@ -106,11 +107,20 @@ def _compute_predictions(feat: pd.DataFrame, config: AppConfig) -> tuple[pd.Seri
         return preds, model_name
 
     if model_name == "fusion":
+        fusion_cfg = FusionConfig(
+            min_confidence=float(getattr(config.broker, "fusion_min_confidence", 0.30)),
+            min_expected_return=float(getattr(config.broker, "fusion_expected_return_floor", 0.0003)),
+            abstain_margin=float(getattr(config.broker, "fusion_abstain_margin", 0.0)),
+            max_news_risk=float(getattr(config.broker, "fusion_news_risk_cutoff", 0.75)),
+            high_vol_vix_threshold=float(getattr(config.broker, "fusion_regime_vix_cutoff", 30.0)),
+            max_model_disagreement=float(getattr(config.broker, "fusion_max_model_disagreement", 0.006)),
+        )
         preds = rolling_train_predict_fusion(
             frame=feat,
             feature_cols=TECHNICAL_FEATURE_COLUMNS,
             target_col="target_next_ret",
             config=config.model,
+            fusion_config=fusion_cfg,
         )
         return preds, model_name
 
@@ -123,23 +133,19 @@ def _compute_predictions(feat: pd.DataFrame, config: AppConfig) -> tuple[pd.Seri
     return preds, "xgb"
 
 
-def run_walk_forward_backtest(config: AppConfig) -> dict:
-    raw = fetch_market_data(
-        ticker=config.data.ticker,
-        interval=config.data.interval,
-        period=config.data.period,
-        prepost=config.data.prepost,
-    )
-    feat = add_technical_features(raw)
-
-    preds, model_used = _compute_predictions(feat, config)
-
+def run_backtest_from_predictions(
+    feat: pd.DataFrame,
+    preds: pd.Series,
+    config: AppConfig,
+    model_used: str,
+) -> dict:
     broker = PaperBroker(config.broker)
     risk_engine = RiskEngine(config.risk, config.broker)
     sentiment = FinBERTSentiment(enabled=False)
     open_state: dict[str, dict] = {}
     exit_variant = str(getattr(config.broker, "exit_rule_variant", "fixed"))
     exit_cfg = _build_exit_rule_config(config, exit_variant)
+    min_hold_bars = int(getattr(config.broker, "fusion_min_holding_bars", 0)) if model_used == "fusion" else 0
 
     # Shifted expanding median avoids lookahead in volatility reference.
     if "vol_20" in feat.columns:
@@ -191,6 +197,13 @@ def run_walk_forward_backtest(config: AppConfig) -> dict:
                 )
                 open_state[config.data.ticker] = state
 
+            if (
+                exit_price is not None
+                and bars_held < int(state.get("min_hold_bars", 0))
+                and exit_reason in {"take_profit", "time_stop", "trailing_stop"}
+            ):
+                exit_price, exit_reason = None, None
+
             if exit_price is not None:
                 close_side = "sell" if state["side"] == "buy" else "buy"
                 broker.submit_order(
@@ -228,13 +241,19 @@ def run_walk_forward_backtest(config: AppConfig) -> dict:
                     "stop_loss": state["stop_loss"],
                     "take_profit": state["take_profit"],
                     "effective_time_stop_bars": state.get("effective_time_stop_bars", config.broker.time_stop_bars),
+                    "min_holding_bars": state.get("min_hold_bars", 0),
                     "exit_reason": exit_reason,
                 })
                 open_state.pop(config.data.ticker, None)
 
         expected = float(preds.loc[ts])
         cvar_95 = compute_cvar_95(feat["ret_1"].iloc[max(0, feat.index.get_loc(ts) - 250): feat.index.get_loc(ts) + 1])
-        sentiment_score = sentiment.analyze(config.data.ticker).score
+        sentiment_score = (
+            _scalar(row, "news_sentiment_score")
+            if "news_sentiment_score" in feat.columns
+            else sentiment.analyze(config.data.ticker).score
+        )
+        news_risk = _scalar(row, "news_risk") if "news_risk" in feat.columns else 0.0
         vol_20 = _scalar(row, "vol_20")
         info = TradeIdeaInput(
             symbol=config.data.ticker,
@@ -242,7 +261,7 @@ def run_walk_forward_backtest(config: AppConfig) -> dict:
             prediction=expected,
             sentiment_score=sentiment_score,
             volatility=vol_20,
-            news_risk=0.0,
+            news_risk=news_risk,
         )
         account = broker.get_account()
         idea = build_trade_idea(info, account["equity"], config.broker, config.risk, cvar_95)
@@ -286,6 +305,7 @@ def run_walk_forward_backtest(config: AppConfig) -> dict:
                     "cvar_95": idea.cvar_95,
                     "peak_price": price,
                     "trough_price": price,
+                    "min_hold_bars": min_hold_bars,
                     "trailing_active": False,
                     "trailing_stop": None,
                 }
@@ -300,4 +320,19 @@ def run_walk_forward_backtest(config: AppConfig) -> dict:
         "fills": pd.DataFrame(broker.get_fills()),
         "positions": pd.DataFrame(broker.get_positions()),
         "trade_diagnostics": pd.DataFrame(trade_diagnostics),
+        "predictions": preds,
+        "features": feat,
     }
+
+
+def run_walk_forward_backtest(config: AppConfig) -> dict:
+    raw = fetch_market_data(
+        ticker=config.data.ticker,
+        interval=config.data.interval,
+        period=config.data.period,
+        prepost=config.data.prepost,
+    )
+    feat = add_technical_features(raw)
+
+    preds, model_used = _compute_predictions(feat, config)
+    return run_backtest_from_predictions(feat, preds, config, model_used)

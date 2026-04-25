@@ -6,6 +6,9 @@ from ta.momentum import RSIIndicator
 from ta.trend import MACD, EMAIndicator
 from ta.volatility import AverageTrueRange
 
+from marketify.data.macro_data import MacroProvider
+from marketify.data.news_data import NewsProvider
+
 
 def _as_1d_series(df: pd.DataFrame, col: str) -> pd.Series:
     """Extract *col* from *df* as a guaranteed 1-D numeric pandas Series.
@@ -52,6 +55,26 @@ TECHNICAL_FEATURE_COLUMNS = [
     "macd_hist",
     "atr_14",
     "vol_20",
+    "intrabar_range_pct",
+    "close_location",
+    "volume_z20",
+    "dollar_volume_z20",
+    "vol_regime_ratio",
+    "volatility_regime_code",
+    "ret_vs_spy_5",
+    "ret_vs_spy_20",
+    "ret_vs_sector_5",
+    "ret_vs_sector_20",
+    "signal_quality_20",
+    "signal_stability_20",
+    "trend_alignment_score",
+    "news_risk",
+    "news_sentiment_score",
+    "news_event_shock",
+    "macro_event_risk",
+    "macro_trend_signal",
+    "macro_regime_bull",
+    "macro_regime_bear",
     "sin_hour",
     "cos_hour",
     "sin_min",
@@ -60,6 +83,12 @@ TECHNICAL_FEATURE_COLUMNS = [
     "is_afternoon",
     "is_late",
 ]
+
+
+def _rolling_zscore(series: pd.Series, window: int) -> pd.Series:
+    mean = series.rolling(window).mean()
+    std = series.rolling(window).std().replace(0.0, np.nan)
+    return (series - mean) / std
 
 
 def add_technical_features(df: pd.DataFrame) -> pd.DataFrame:
@@ -95,6 +124,38 @@ def add_technical_features(df: pd.DataFrame) -> pd.DataFrame:
 
     out["atr_14"] = AverageTrueRange(high, low, close, window=14).average_true_range()
     out["vol_20"] = close.pct_change().rolling(20).std()
+    intrabar_range = (high - low).clip(lower=0.0)
+    out["intrabar_range_pct"] = intrabar_range / close.replace(0.0, np.nan)
+    out["close_location"] = ((close - low) / intrabar_range.replace(0.0, np.nan)).clip(0.0, 1.0) - 0.5
+    out["volume_z20"] = _rolling_zscore(volume, 20)
+    out["dollar_volume_z20"] = _rolling_zscore(close * volume, 20)
+    out["vol_regime_ratio"] = out["vol_20"] / out["vol_20"].rolling(60).median().replace(0.0, np.nan)
+    out["volatility_regime_code"] = np.select(
+        [out["vol_regime_ratio"] > 1.25, out["vol_regime_ratio"] < 0.75],
+        [1.0, -1.0],
+        default=0.0,
+    )
+
+    if "SPY_Close" in out.columns:
+        spy_close = _as_1d_series(out, "SPY_Close")
+        out["ret_vs_spy_5"] = close.pct_change(5) - spy_close.pct_change(5)
+        out["ret_vs_spy_20"] = close.pct_change(20) - spy_close.pct_change(20)
+    else:
+        out["ret_vs_spy_5"] = 0.0
+        out["ret_vs_spy_20"] = 0.0
+
+    if "XLK_Close" in out.columns:
+        sector_close = _as_1d_series(out, "XLK_Close")
+        out["ret_vs_sector_5"] = close.pct_change(5) - sector_close.pct_change(5)
+        out["ret_vs_sector_20"] = close.pct_change(20) - sector_close.pct_change(20)
+    else:
+        out["ret_vs_sector_5"] = 0.0
+        out["ret_vs_sector_20"] = 0.0
+
+    out["signal_quality_20"] = close.pct_change(5).abs() / (out["vol_20"] + 1e-9)
+    out["signal_stability_20"] = close.pct_change().rolling(20).mean().abs() / (
+        close.pct_change().rolling(20).std() + 1e-9
+    )
 
     out["minute"] = out.index.minute
     out["hour"] = out.index.hour
@@ -105,6 +166,24 @@ def add_technical_features(df: pd.DataFrame) -> pd.DataFrame:
     out["is_morning"] = ((out["hour"] >= 6) & (out["hour"] <= 11)).astype(int)
     out["is_afternoon"] = ((out["hour"] >= 12) & (out["hour"] <= 15)).astype(int)
     out["is_late"] = ((out["hour"] >= 16) | (out["hour"] <= 5)).astype(int)
+    out["trend_alignment_score"] = (
+        np.sign(out["ema_dist_10"].fillna(0.0))
+        + np.sign(out["ema_dist_20"].fillna(0.0))
+        + np.sign(out["macd_hist"].fillna(0.0))
+    ) / 3.0
+
+    ticker = str(out.attrs.get("ticker", "AAPL"))
+    news = NewsProvider().summarize_risk(ticker)
+    macro = MacroProvider().regime_features(ticker)
+    out["news_risk"] = float(news.get("news_risk", 0.0))
+    out["news_sentiment_score"] = float(news.get("sentiment_score", 0.0))
+    out["news_event_shock"] = float(news.get("event_shock_flag", 0.0))
+    out["macro_event_risk"] = float(macro.get("macro_event_risk", 0.0))
+    out["macro_trend_signal"] = float(macro.get("trend_signal", 0.0))
+    out["macro_regime_bull"] = float(macro.get("regime_bull", 0.0))
+    out["macro_regime_bear"] = float(macro.get("regime_bear", 0.0))
+    if "vix_proxy" not in out.columns:
+        out["vix_proxy"] = float(macro.get("vix_proxy", 20.0))
 
     out["target_next_ret"] = close.pct_change().shift(-1)
     out = out.replace([np.inf, -np.inf], np.nan).dropna()

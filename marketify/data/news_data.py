@@ -17,6 +17,7 @@ class NewsItem:
 NEUTRAL_SUMMARY: dict[str, Any] = {
     "news_risk": 0.0,
     "sentiment_score": 0.0,
+    "event_shock_flag": 0.0,
     "headline_count": 0,
     "summary": "No API key/news feed configured; using neutral news risk.",
 }
@@ -64,11 +65,13 @@ class NewsProvider:
         if not items:
             return dict(NEUTRAL_SUMMARY)
 
-        risk = min(1.0, 0.2 + len(items) * 0.05)
         sentiment = self.compute_aggregate_sentiment(items)
+        risk = min(1.0, 0.2 + len(items) * 0.05 + min(abs(sentiment), 1.0) * 0.15)
+        event_shock_flag = 1.0 if risk >= 0.75 or abs(sentiment) >= 0.6 else 0.0
         return {
             "news_risk": risk,
             "sentiment_score": sentiment,
+            "event_shock_flag": event_shock_flag,
             "headline_count": len(items),
             "summary": f"News feed active with {len(items)} recent headlines.",
         }

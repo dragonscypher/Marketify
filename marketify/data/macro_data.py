@@ -54,6 +54,9 @@ class MacroProvider:
             "regime_bear": 1.0 if r.regime == "bear" else 0.0,
             "regime_neutral": 1.0 if r.regime == "neutral" else 0.0,
             "vol_level_high": 1.0 if r.volatility_level == "high" else 0.0,
+            "macro_event_risk": 0.0,
+            "macro_event_window": 0.0,
+            "macro_policy_bias": 0.0,
             "trend_signal": float(r.trend_signal),
         }
 

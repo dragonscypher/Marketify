@@ -44,6 +44,14 @@ class BrokerConfig:
     allow_shorts: bool = True
     max_position_fraction: float = 0.1
     db_path: str = "data/marketify_paper.db"
+    # Fusion policy knobs (deterministic; no leverage change)
+    fusion_min_confidence: float = 0.30
+    fusion_expected_return_floor: float = 0.0003
+    fusion_abstain_margin: float = 0.0
+    fusion_news_risk_cutoff: float = 0.75
+    fusion_regime_vix_cutoff: float = 30.0
+    fusion_max_model_disagreement: float = 0.006
+    fusion_min_holding_bars: int = 0
 
 
 @dataclass

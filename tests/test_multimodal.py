@@ -174,6 +174,19 @@ class TestFusionModel:
         )
         assert score.risk_flag is True
 
+    def test_abstain_when_model_disagreement_too_wide(self):
+        from marketify.models.fusion_model import FusionConfig, FusionPredictor
+
+        cfg = FusionConfig(min_expected_return=1e-4, min_confidence=0.1, max_model_disagreement=0.001)
+        predictor = FusionPredictor(cfg)
+        score = predictor.score(
+            tabular_score=0.010,
+            sequence_score=-0.010,
+            sentiment_score=0.0,
+        )
+        assert score.abstain_flag is True
+        assert "disagreement" in score.reason
+
     def test_no_self_modification(self):
         """Fusion predictor must not mutate its own policy thresholds."""
         from marketify.models.fusion_model import FusionConfig, FusionPredictor
@@ -311,6 +324,77 @@ class TestMultimodalBenchmarkReports:
         ]
         best = mb._pick_best_model(rows)
         assert best["model"] == "fusion"
+
+    def test_policy_tuning_and_next_status_files_written(self, tmp_path):
+        import scripts.run_multimodal_benchmark as mb
+
+        tuning_rows = [
+            {
+                "policy": {
+                    "fusion_min_confidence": 0.35,
+                    "fusion_expected_return_floor": 0.00035,
+                    "fusion_max_model_disagreement": 0.004,
+                    "fusion_news_risk_cutoff": 0.70,
+                    "fusion_regime_vix_cutoff": 28.0,
+                    "fusion_min_holding_bars": 6,
+                },
+                "metrics": {
+                    "weekly_return_pct": 0.9,
+                    "daily_return_pct": 0.05,
+                    "sharpe_ratio": 0.4,
+                    "sortino_ratio": 0.8,
+                    "max_drawdown_pct": 0.3,
+                    "cvar_95_pct": 0.1,
+                    "trade_count": 12,
+                    "win_rate_pct": 58.0,
+                    "expectancy": 1.0,
+                    "weekly_pass": False,
+                    "daily_pass": False,
+                    "weekly_status": "FAIL",
+                    "daily_status": "FAIL",
+                    "target_weekly_pct": 1.0,
+                    "target_daily_pct": 1.0,
+                },
+                "validation_start_ts": "2026-01-01 00:00:00",
+            }
+        ]
+        baseline = {
+            "model": "fusion",
+            "metrics": {
+                "weekly_return_pct": 0.9833,
+                "daily_return_pct": 0.0405,
+                "sharpe_ratio": 0.3512,
+                "sortino_ratio": 1.2457,
+                "max_drawdown_pct": 0.7898,
+                "cvar_95_pct": 0.0556,
+                "trade_count": 45,
+                "win_rate_pct": 55.56,
+                "expectancy": 1.2453,
+                "weekly_pass": False,
+                "daily_pass": False,
+                "weekly_status": "FAIL",
+                "daily_status": "FAIL",
+                "target_weekly_pct": 1.0,
+                "target_daily_pct": 1.0,
+            },
+        }
+        tuned = {
+            "model": "fusion",
+            "metrics": {
+                **baseline["metrics"],
+                "weekly_return_pct": 1.01,
+                "weekly_pass": True,
+                "weekly_status": "PASS",
+            },
+        }
+        winner = tuned
+
+        mb._write_fusion_policy_tuning(tuning_rows, tmp_path)
+        mb._write_next_status(baseline, tuning_rows[0], tuned, winner, tmp_path)
+
+        assert (tmp_path / "fusion_policy_tuning.csv").exists()
+        assert (tmp_path / "fusion_policy_tuning.md").exists()
+        assert (tmp_path / "NEXT_STATUS.md").exists()
 
 
 # ---------------------------------------------------------------------------

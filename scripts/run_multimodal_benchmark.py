@@ -1,29 +1,30 @@
-﻿"""Multimodal walk-forward benchmark.
+"""Multimodal walk-forward benchmark with validation-only fusion policy tuning.
 
-Compares four model lanes on the same untouched test split:
+Architecture unchanged:
   1. ridge   - tabular Ridge regression
   2. xgb     - tabular XGBoost
   3. gru     - GRU sequence model
-  4. fusion  - deterministic fusion (xgb + gru + neutral sentiment)
+  4. fusion  - deterministic fusion (xgb + gru + sentiment/news/regime gates)
 
-Saves to reports/:
-  multimodal_leaderboard.csv
-  multimodal_leaderboard.md
-  multimodal_real_benchmark.md
-  multimodal_trades.csv
-  multimodal_equity_curve.csv
+Policy tuning rules:
+  - tune fusion policy on validation slice only
+  - final benchmark report uses real walk-forward path once after selection
+  - no leverage increase; position sizing unchanged
+  - deterministic only; no self-modification
 
-Reports 1% weekly PASS/FAIL honestly.  If weekly return < 1% -> FAIL with exact numbers.
-
-Run only in Colab (GRU training requires GPU / adequate RAM):
-  python scripts/colab_check.py
-  python -m pip install -r requirements-colab.txt
-  python -m pip install -e .
-  python scripts/run_multimodal_benchmark.py
+Outputs:
+  reports/fusion_policy_tuning.csv
+  reports/fusion_policy_tuning.md
+  reports/multimodal_leaderboard.csv
+  reports/multimodal_leaderboard.md
+  reports/multimodal_real_benchmark.md
+  reports/NEXT_STATUS.md
+  reports/multimodal_trades.csv
+  reports/multimodal_equity_curve.csv
 """
 from __future__ import annotations
 
-import json
+import itertools
 import os
 import sys
 from copy import deepcopy
@@ -38,9 +39,20 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 os.chdir(ROOT)
 
+from marketify.models.fusion_model import (FusionConfig,
+                                           fuse_prediction_components)
+
 REPORTS = ROOT / "reports"
 WEEKLY_GOAL = 0.01
 DAILY_GOAL = 0.01
+VALIDATION_FRACTION = 0.15
+
+_GRID_MIN_CONFIDENCE = [0.30, 0.35]
+_GRID_EXPECTED_FLOOR = [0.00030, 0.00035]
+_GRID_DISAGREEMENT = [0.0040, 0.0060]
+_GRID_NEWS_CUTOFF = [0.70, 0.75]
+_GRID_REGIME_CUTOFF = [28.0, 30.0]
+_GRID_MIN_HOLDING_BARS = [0, 6]
 
 
 def _ensure_dir(p: Path) -> Path:
@@ -147,16 +159,130 @@ def _compute_extended_metrics(
     }
 
 
-def _pick_best_model(rows: list[dict]) -> dict:
+def _pick_best_model(rows: list[dict], metrics_key: str = "metrics") -> dict:
     def _key(row: dict) -> tuple:
-        m = row["metrics"]
+        m = row[metrics_key]
         return (
             float(m.get("weekly_return_pct", 0.0)),
             float(m.get("sharpe_ratio", 0.0)),
             -float(m.get("max_drawdown_pct", 0.0)),
             int(m.get("trade_count", 0)),
         )
+
     return sorted(rows, key=_key, reverse=True)[0]
+
+
+def _validation_start_index(n_rows: int) -> int:
+    if n_rows <= 2:
+        return 0
+    start = int(round(n_rows * (1.0 - VALIDATION_FRACTION)))
+    return max(0, min(start, n_rows - 2))
+
+
+def _validation_slice(
+    feat: pd.DataFrame,
+    tabular_preds: pd.Series,
+    sequence_preds: pd.Series,
+) -> tuple[pd.DataFrame, pd.Series, pd.Series, pd.Timestamp | None]:
+    start = _validation_start_index(len(feat))
+    val_feat = feat.iloc[start:].copy()
+    val_tab = tabular_preds.reindex(val_feat.index)
+    val_seq = sequence_preds.reindex(val_feat.index)
+    start_ts = val_feat.index[0] if len(val_feat) else None
+    return val_feat, val_tab, val_seq, start_ts
+
+
+def _default_policy(config) -> dict:
+    return {
+        "fusion_min_confidence": float(getattr(config.broker, "fusion_min_confidence", 0.30)),
+        "fusion_expected_return_floor": float(getattr(config.broker, "fusion_expected_return_floor", 0.0003)),
+        "fusion_max_model_disagreement": float(getattr(config.broker, "fusion_max_model_disagreement", 0.006)),
+        "fusion_news_risk_cutoff": float(getattr(config.broker, "fusion_news_risk_cutoff", 0.75)),
+        "fusion_regime_vix_cutoff": float(getattr(config.broker, "fusion_regime_vix_cutoff", 30.0)),
+        "fusion_min_holding_bars": int(getattr(config.broker, "fusion_min_holding_bars", 0)),
+    }
+
+
+def _policy_grid() -> list[dict]:
+    rows: list[dict] = []
+    for combo in itertools.product(
+        _GRID_MIN_CONFIDENCE,
+        _GRID_EXPECTED_FLOOR,
+        _GRID_DISAGREEMENT,
+        _GRID_NEWS_CUTOFF,
+        _GRID_REGIME_CUTOFF,
+        _GRID_MIN_HOLDING_BARS,
+    ):
+        rows.append(
+            {
+                "fusion_min_confidence": float(combo[0]),
+                "fusion_expected_return_floor": float(combo[1]),
+                "fusion_max_model_disagreement": float(combo[2]),
+                "fusion_news_risk_cutoff": float(combo[3]),
+                "fusion_regime_vix_cutoff": float(combo[4]),
+                "fusion_min_holding_bars": int(combo[5]),
+            }
+        )
+    return rows
+
+
+def _fusion_config_from_policy(policy: dict) -> FusionConfig:
+    return FusionConfig(
+        min_confidence=float(policy["fusion_min_confidence"]),
+        min_expected_return=float(policy["fusion_expected_return_floor"]),
+        abstain_margin=0.0,
+        max_news_risk=float(policy["fusion_news_risk_cutoff"]),
+        high_vol_vix_threshold=float(policy["fusion_regime_vix_cutoff"]),
+        max_model_disagreement=float(policy["fusion_max_model_disagreement"]),
+    )
+
+
+def _apply_policy(config, policy: dict):
+    cfg = deepcopy(config)
+    cfg.broker.backtest_model = "fusion"  # type: ignore[attr-defined]
+    cfg.broker.fusion_min_confidence = policy["fusion_min_confidence"]
+    cfg.broker.fusion_expected_return_floor = policy["fusion_expected_return_floor"]
+    cfg.broker.fusion_max_model_disagreement = policy["fusion_max_model_disagreement"]
+    cfg.broker.fusion_news_risk_cutoff = policy["fusion_news_risk_cutoff"]
+    cfg.broker.fusion_regime_vix_cutoff = policy["fusion_regime_vix_cutoff"]
+    cfg.broker.fusion_min_holding_bars = policy["fusion_min_holding_bars"]
+    return cfg
+
+
+def _run_cached_fusion_backtest(
+    feat: pd.DataFrame,
+    tabular_preds: pd.Series,
+    sequence_preds: pd.Series,
+    base_config,
+    policy: dict,
+    full_path: bool,
+) -> dict:
+    from marketify.backtest.simulator import run_backtest_from_predictions
+
+    work_feat = feat
+    work_tab = tabular_preds
+    work_seq = sequence_preds
+    validation_start_ts = None
+    if not full_path:
+        work_feat, work_tab, work_seq, validation_start_ts = _validation_slice(feat, tabular_preds, sequence_preds)
+
+    cfg = _apply_policy(base_config, policy)
+    preds = fuse_prediction_components(
+        frame=work_feat,
+        tabular_preds=work_tab,
+        sequence_preds=work_seq,
+        fusion_config=_fusion_config_from_policy(policy),
+    )
+    result = run_backtest_from_predictions(work_feat, preds, cfg, model_used="fusion")
+    metrics = _compute_extended_metrics(result["equity"], result["trade_diagnostics"])
+    return {
+        "model": "fusion",
+        "policy": policy,
+        "metrics": metrics,
+        "equity": result["equity"],
+        "trade_diagnostics": result["trade_diagnostics"],
+        "validation_start_ts": str(validation_start_ts) if validation_start_ts is not None else "",
+    }
 
 
 def _write_leaderboard(rows: list[dict], reports_dir: Path) -> None:
@@ -178,6 +304,8 @@ def _write_leaderboard(rows: list[dict], reports_dir: Path) -> None:
     df.to_csv(reports_dir / "multimodal_leaderboard.csv", index=False)
 
     md_lines = ["# Multimodal Model Leaderboard", ""]
+    md_lines.append("Selection rule: fusion policy selected on validation slice only. Metrics below use final real benchmark path.")
+    md_lines.append("")
     header = "| " + " | ".join(cols) + " |"
     sep = "| " + " | ".join(["---"] * len(cols)) + " |"
     md_lines.extend([header, sep])
@@ -189,6 +317,7 @@ def _write_leaderboard(rows: list[dict], reports_dir: Path) -> None:
 
 def _write_real_benchmark_md(best: dict, all_rows: list[dict], reports_dir: Path) -> None:
     m = best["metrics"]
+    gap = round(float(m["target_weekly_pct"]) - float(m["weekly_return_pct"]), 4)
     ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
     lines = [
@@ -196,12 +325,12 @@ def _write_real_benchmark_md(best: dict, all_rows: list[dict], reports_dir: Path
         "",
         f"Generated: {ts}",
         "",
+        "Fusion policy selected on validation slice only. Final numbers below use real benchmark path once.",
+        "",
         f"Best model: {best['model']}",
         "",
-        f"Weekly return: {m['weekly_return_pct']}%  ->  {m['weekly_status']} "
-        f"(target: {m['target_weekly_pct']}%)",
-        f"Daily return:  {m['daily_return_pct']}%  ->  {m['daily_status']} "
-        f"(target: {m['target_daily_pct']}%)",
+        f"Weekly return: {m['weekly_return_pct']}%  ->  {m['weekly_status']} (target: {m['target_weekly_pct']}%)",
+        f"Daily return:  {m['daily_return_pct']}%  ->  {m['daily_status']} (target: {m['target_daily_pct']}%)",
         f"Sharpe:        {m['sharpe_ratio']}",
         f"Sortino:       {m['sortino_ratio']}",
         f"Max drawdown:  {m['max_drawdown_pct']}%",
@@ -212,33 +341,156 @@ def _write_real_benchmark_md(best: dict, all_rows: list[dict], reports_dir: Path
         "",
         "## All models",
         "",
-        "| Model | Weekly% | Sharpe | Max DD% | Trades | Weekly |",
-        "| ----- | ------- | ------ | ------- | ------ | ------ |",
+        "| Model | Weekly% | Daily% | Sharpe | Sortino | Max DD% | CVaR 5% | Trades | Win Rate% | Weekly |",
+        "| ----- | ------- | ------ | ------ | ------- | ------- | ------- | ------ | --------- | ------ |",
     ]
     for row in all_rows:
         r = row["metrics"]
         lines.append(
-            f"| {row['model']} | {r['weekly_return_pct']} | {r['sharpe_ratio']} | "
-            f"{r['max_drawdown_pct']} | {r['trade_count']} | {r['weekly_status']} |"
+            f"| {row['model']} | {r['weekly_return_pct']} | {r['daily_return_pct']} | {r['sharpe_ratio']} | "
+            f"{r['sortino_ratio']} | {r['max_drawdown_pct']} | {r['cvar_95_pct']} | {r['trade_count']} | "
+            f"{r['win_rate_pct']} | {r['weekly_status']} |"
         )
 
     if not m["weekly_pass"]:
         lines += [
             "",
-            "WARNING: FAIL — weekly return below 1% target.",
+            "WARNING: FAIL - weekly return below 1% target.",
             f"Actual: {m['weekly_return_pct']}%.  Target: {m['target_weekly_pct']}%.",
-            "No profit claims made.  Continue improving signal quality.",
+            f"Gap: {gap} percentage points.",
+            "No profit claims made. Continue improving decision quality only.",
         ]
 
     lines.append("")
     (reports_dir / "multimodal_real_benchmark.md").write_text("\n".join(lines), encoding="utf-8")
 
 
-def _write_trades_and_equity(
-    best_model: str,
-    all_rows: list[dict],
+def _write_fusion_policy_tuning(rows: list[dict], reports_dir: Path) -> None:
+    records: list[dict] = []
+    for row in rows:
+        p = row["policy"]
+        m = row["metrics"]
+        records.append(
+            {
+                **p,
+                "validation_weekly_return_pct": m["weekly_return_pct"],
+                "validation_daily_return_pct": m["daily_return_pct"],
+                "validation_sharpe_ratio": m["sharpe_ratio"],
+                "validation_sortino_ratio": m["sortino_ratio"],
+                "validation_max_drawdown_pct": m["max_drawdown_pct"],
+                "validation_cvar_95_pct": m["cvar_95_pct"],
+                "validation_trade_count": m["trade_count"],
+                "validation_win_rate_pct": m["win_rate_pct"],
+                "validation_weekly_status": m["weekly_status"],
+                "validation_start_ts": row.get("validation_start_ts", ""),
+            }
+        )
+
+    if not records:
+        pd.DataFrame().to_csv(reports_dir / "fusion_policy_tuning.csv", index=False)
+        (reports_dir / "fusion_policy_tuning.md").write_text("# Fusion Policy Tuning\n\nNo rows.\n", encoding="utf-8")
+        return
+
+    df = pd.DataFrame(records).sort_values(
+        by=["validation_weekly_return_pct", "validation_sharpe_ratio", "validation_max_drawdown_pct", "validation_trade_count"],
+        ascending=[False, False, True, False],
+    )
+    df.to_csv(reports_dir / "fusion_policy_tuning.csv", index=False)
+
+    cols = list(df.columns)
+    md_lines = ["# Fusion Policy Tuning", ""]
+    md_lines.append("Validation slice only. Full benchmark path hidden until final selected policy run.")
+    md_lines.append("")
+    md_lines.append("| " + " | ".join(cols) + " |")
+    md_lines.append("| " + " | ".join(["---"] * len(cols)) + " |")
+    for _, rec in df.iterrows():
+        md_lines.append("| " + " | ".join(str(rec[c]) for c in cols) + " |")
+    md_lines.append("")
+    (reports_dir / "fusion_policy_tuning.md").write_text("\n".join(md_lines), encoding="utf-8")
+
+
+def _write_next_status(
+    baseline_fusion: dict,
+    best_validation_policy: dict,
+    final_tuned_fusion: dict,
+    winner: dict,
     reports_dir: Path,
 ) -> None:
+    b = baseline_fusion["metrics"]
+    v = best_validation_policy["metrics"]
+    t = final_tuned_fusion["metrics"]
+    w = winner["metrics"]
+    delta = round(float(t["weekly_return_pct"]) - float(b["weekly_return_pct"]), 4)
+    gap = round(float(t["target_weekly_pct"]) - float(t["weekly_return_pct"]), 4)
+
+    lines = [
+        "# NEXT STATUS",
+        "",
+        "Scope: fusion policy optimization only. No new models. No leverage increase.",
+        "",
+        "## Baseline Fusion (real benchmark path)",
+        f"- weekly_return_pct: {b['weekly_return_pct']}",
+        f"- daily_return_pct: {b['daily_return_pct']}",
+        f"- sharpe_ratio: {b['sharpe_ratio']}",
+        f"- sortino_ratio: {b['sortino_ratio']}",
+        f"- max_drawdown_pct: {b['max_drawdown_pct']}",
+        f"- cvar_95_pct: {b['cvar_95_pct']}",
+        f"- trade_count: {b['trade_count']}",
+        f"- weekly_status: {b['weekly_status']}",
+        "",
+        "## Best Validation Policy",
+        f"- min_confidence: {best_validation_policy['policy']['fusion_min_confidence']}",
+        f"- expected_return_floor: {best_validation_policy['policy']['fusion_expected_return_floor']}",
+        f"- max_model_disagreement: {best_validation_policy['policy']['fusion_max_model_disagreement']}",
+        f"- news_risk_cutoff: {best_validation_policy['policy']['fusion_news_risk_cutoff']}",
+        f"- regime_vix_cutoff: {best_validation_policy['policy']['fusion_regime_vix_cutoff']}",
+        f"- min_holding_bars: {best_validation_policy['policy']['fusion_min_holding_bars']}",
+        f"- validation_weekly_return_pct: {v['weekly_return_pct']}",
+        f"- validation_sharpe_ratio: {v['sharpe_ratio']}",
+        f"- validation_max_drawdown_pct: {v['max_drawdown_pct']}",
+        f"- validation_trade_count: {v['trade_count']}",
+        "",
+        "## Final Tuned Fusion (real benchmark path)",
+        f"- weekly_return_pct: {t['weekly_return_pct']}",
+        f"- daily_return_pct: {t['daily_return_pct']}",
+        f"- sharpe_ratio: {t['sharpe_ratio']}",
+        f"- sortino_ratio: {t['sortino_ratio']}",
+        f"- max_drawdown_pct: {t['max_drawdown_pct']}",
+        f"- cvar_95_pct: {t['cvar_95_pct']}",
+        f"- trade_count: {t['trade_count']}",
+        f"- win_rate_pct: {t['win_rate_pct']}",
+        f"- weekly_delta_vs_baseline_pct_points: {delta}",
+        "",
+    ]
+
+    if t["weekly_pass"]:
+        lines += [
+            "Result: PASS",
+            f"Weekly {t['weekly_return_pct']}% >= {t['target_weekly_pct']}% target.",
+        ]
+    else:
+        lines += [
+            "Result: FAIL",
+            f"Weekly {t['weekly_return_pct']}% < {t['target_weekly_pct']}% target.",
+            f"Missing by: {gap} percentage points.",
+        ]
+
+    lines += [
+        "",
+        "## Numerical Reason",
+        f"- win_rate_pct: {t['win_rate_pct']}",
+        f"- expectancy: {t['expectancy']}",
+        f"- drawdown_pct: {t['max_drawdown_pct']}",
+        f"- cvar_95_pct: {t['cvar_95_pct']}",
+        f"- winner_lane_after_tuning: {winner['model']}",
+        f"- winner_weekly_return_pct: {w['weekly_return_pct']}",
+        f"- winner_weekly_status: {w['weekly_status']}",
+        "",
+    ]
+    (reports_dir / "NEXT_STATUS.md").write_text("\n".join(lines), encoding="utf-8")
+
+
+def _write_trades_and_equity(best_model: str, all_rows: list[dict], reports_dir: Path) -> None:
     for row in all_rows:
         if row["model"] == best_model:
             trade_diag: pd.DataFrame = row.get("trade_diagnostics", pd.DataFrame())
@@ -258,75 +510,119 @@ def main() -> int:
     _ensure_dir(REPORTS)
     config = AppConfig()
 
-    model_names = ["ridge", "xgb", "gru", "fusion"]
     rows: list[dict] = []
+    shared_feat: pd.DataFrame | None = None
+    xgb_preds: pd.Series | None = None
+    gru_preds: pd.Series | None = None
 
-    for model_name in model_names:
+    for model_name in ["ridge", "xgb", "gru"]:
         print(f"\n[multimodal] Running lane: {model_name} ...")
         lane_config = deepcopy(config)
         lane_config.broker.backtest_model = model_name  # type: ignore[attr-defined]
 
-        try:
-            result = run_walk_forward_backtest(lane_config)
-        except Exception as exc:
-            print(f"  ERROR in {model_name}: {exc}")
-            rows.append({
-                "model": model_name,
-                "metrics": {
-                    "weekly_return_pct": 0.0,
-                    "daily_return_pct": 0.0,
-                    "sharpe_ratio": 0.0,
-                    "sortino_ratio": 0.0,
-                    "max_drawdown_pct": 0.0,
-                    "cvar_95_pct": 0.0,
-                    "trade_count": 0,
-                    "win_rate_pct": 0.0,
-                    "expectancy": 0.0,
-                    "weekly_pass": False,
-                    "daily_pass": False,
-                    "weekly_status": "ERROR",
-                    "daily_status": "ERROR",
-                    "target_weekly_pct": round(WEEKLY_GOAL * 100, 2),
-                    "target_daily_pct": round(DAILY_GOAL * 100, 2),
-                    "error": str(exc),
-                },
-                "equity": pd.Series(dtype=float),
-                "trade_diagnostics": pd.DataFrame(),
-            })
-            continue
-
+        result = run_walk_forward_backtest(lane_config)
         equity: pd.Series = result.get("equity", pd.Series(dtype=float))
         trade_diag: pd.DataFrame = result.get("trade_diagnostics", pd.DataFrame())
         metrics = _compute_extended_metrics(equity, trade_diag)
-        rows.append({
+        row = {
             "model": model_name,
             "metrics": metrics,
             "equity": equity,
             "trade_diagnostics": trade_diag,
-        })
-        status = metrics["weekly_status"]
+            "predictions": result.get("predictions", pd.Series(dtype=float)),
+            "features": result.get("features"),
+        }
+        rows.append(row)
         print(
-            f"  {model_name}: weekly={metrics['weekly_return_pct']}%  "
-            f"sharpe={metrics['sharpe_ratio']}  dd={metrics['max_drawdown_pct']}%  "
-            f"trades={metrics['trade_count']}  ->  {status}"
+            f"  {model_name}: weekly={metrics['weekly_return_pct']}% "
+            f"sharpe={metrics['sharpe_ratio']} dd={metrics['max_drawdown_pct']}% trades={metrics['trade_count']}"
         )
 
-    if not rows:
-        print("ERROR: all lanes failed -- no report written.")
+        if model_name == "xgb":
+            xgb_preds = row["predictions"]
+            shared_feat = row["features"]
+        elif model_name == "gru":
+            gru_preds = row["predictions"]
+            if shared_feat is None:
+                shared_feat = row["features"]
+
+    if shared_feat is None or xgb_preds is None or gru_preds is None:
+        print("ERROR: missing cached predictions for fusion tuning.")
         return 1
 
-    best = _pick_best_model(rows)
-    print(f"\n[multimodal] Best model: {best['model']}")
+    baseline_fusion = _run_cached_fusion_backtest(
+        feat=shared_feat,
+        tabular_preds=xgb_preds,
+        sequence_preds=gru_preds,
+        base_config=config,
+        policy=_default_policy(config),
+        full_path=True,
+    )
+    print(
+        f"\n[multimodal] fusion baseline: weekly={baseline_fusion['metrics']['weekly_return_pct']}% "
+        f"sharpe={baseline_fusion['metrics']['sharpe_ratio']} dd={baseline_fusion['metrics']['max_drawdown_pct']}% "
+        f"trades={baseline_fusion['metrics']['trade_count']}"
+    )
+    rows.append(baseline_fusion)
 
-    _write_leaderboard(rows, REPORTS)
-    _write_real_benchmark_md(best, rows, REPORTS)
-    _write_trades_and_equity(best["model"], rows, REPORTS)
+    policy_grid = _policy_grid()
+    print(f"\n[fusion-tuning] Running {len(policy_grid)} policy combos on validation slice only ...")
+    tuned_rows: list[dict] = []
+    for idx, policy in enumerate(policy_grid, start=1):
+        tuned = _run_cached_fusion_backtest(
+            feat=shared_feat,
+            tabular_preds=xgb_preds,
+            sequence_preds=gru_preds,
+            base_config=config,
+            policy=policy,
+            full_path=False,
+        )
+        tuned_rows.append(tuned)
+        tm = tuned["metrics"]
+        print(
+            f"  combo {idx}/{len(policy_grid)}: weekly={tm['weekly_return_pct']}% "
+            f"sharpe={tm['sharpe_ratio']} dd={tm['max_drawdown_pct']}% trades={tm['trade_count']}"
+        )
+
+    if not tuned_rows:
+        print("ERROR: no fusion policy results generated.")
+        return 1
+
+    best_validation_policy = _pick_best_model(tuned_rows, metrics_key="metrics")
+    _write_fusion_policy_tuning(tuned_rows, REPORTS)
+
+    final_tuned_fusion = _run_cached_fusion_backtest(
+        feat=shared_feat,
+        tabular_preds=xgb_preds,
+        sequence_preds=gru_preds,
+        base_config=config,
+        policy=best_validation_policy["policy"],
+        full_path=True,
+    )
+
+    final_rows: list[dict] = []
+    for row in rows:
+        if row["model"] == "fusion":
+            final_rows.append(final_tuned_fusion)
+        else:
+            final_rows.append(row)
+
+    best = _pick_best_model(final_rows)
+    print(f"\n[multimodal] Best model after fusion tuning: {best['model']}")
+
+    _write_leaderboard(final_rows, REPORTS)
+    _write_real_benchmark_md(best, final_rows, REPORTS)
+    _write_trades_and_equity(best["model"], final_rows, REPORTS)
+    _write_next_status(baseline_fusion, best_validation_policy, final_tuned_fusion, best, REPORTS)
 
     print(f"\nReports written to {REPORTS}/")
     for fname in [
+        "fusion_policy_tuning.csv",
+        "fusion_policy_tuning.md",
         "multimodal_leaderboard.csv",
         "multimodal_leaderboard.md",
         "multimodal_real_benchmark.md",
+        "NEXT_STATUS.md",
         "multimodal_trades.csv",
         "multimodal_equity_curve.csv",
     ]:

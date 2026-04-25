@@ -26,6 +26,26 @@ except ModuleNotFoundError as exc:
         "macd_hist",
         "atr_14",
         "vol_20",
+        "intrabar_range_pct",
+        "close_location",
+        "volume_z20",
+        "dollar_volume_z20",
+        "vol_regime_ratio",
+        "volatility_regime_code",
+        "ret_vs_spy_5",
+        "ret_vs_spy_20",
+        "ret_vs_sector_5",
+        "ret_vs_sector_20",
+        "signal_quality_20",
+        "signal_stability_20",
+        "trend_alignment_score",
+        "news_risk",
+        "news_sentiment_score",
+        "news_event_shock",
+        "macro_event_risk",
+        "macro_trend_signal",
+        "macro_regime_bull",
+        "macro_regime_bear",
         "sin_hour",
         "cos_hour",
         "sin_min",
@@ -215,7 +235,10 @@ def prepare_recurrent_training_frame(
 ) -> tuple[pd.DataFrame, list[str], str]:
     out = _flatten_recurrent_frame(frame)
     out = add_volatility_regime_feature(out)
-    feature_cols = [col for col in [*OHLCV_COLUMNS, *TECHNICAL_FEATURE_COLUMNS, VOLATILITY_REGIME_CODE_COLUMN] if col in out.columns]
+    feature_cols: list[str] = []
+    for col in [*OHLCV_COLUMNS, *TECHNICAL_FEATURE_COLUMNS, VOLATILITY_REGIME_CODE_COLUMN]:
+        if col in out.columns and col not in feature_cols:
+            feature_cols.append(col)
     if feature_cols:
         out[feature_cols] = out[feature_cols].apply(pd.to_numeric, errors="coerce")
     out = out.replace([np.inf, -np.inf], np.nan)
