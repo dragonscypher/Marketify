@@ -49,6 +49,7 @@ VALIDATION_FRACTION = 0.15
 
 _GRID_MIN_CONFIDENCE = [0.30, 0.35]
 _GRID_EXPECTED_FLOOR = [0.00030, 0.00035]
+_GRID_ABSTAIN_MARGIN = [0.0, 0.00005]
 _GRID_DISAGREEMENT = [0.0040, 0.0060]
 _GRID_NEWS_CUTOFF = [0.70, 0.75]
 _GRID_REGIME_CUTOFF = [28.0, 30.0]
@@ -196,6 +197,7 @@ def _default_policy(config) -> dict:
     return {
         "fusion_min_confidence": float(getattr(config.broker, "fusion_min_confidence", 0.30)),
         "fusion_expected_return_floor": float(getattr(config.broker, "fusion_expected_return_floor", 0.0003)),
+        "fusion_abstain_margin": float(getattr(config.broker, "fusion_abstain_margin", 0.0)),
         "fusion_max_model_disagreement": float(getattr(config.broker, "fusion_max_model_disagreement", 0.006)),
         "fusion_news_risk_cutoff": float(getattr(config.broker, "fusion_news_risk_cutoff", 0.75)),
         "fusion_regime_vix_cutoff": float(getattr(config.broker, "fusion_regime_vix_cutoff", 30.0)),
@@ -208,6 +210,7 @@ def _policy_grid() -> list[dict]:
     for combo in itertools.product(
         _GRID_MIN_CONFIDENCE,
         _GRID_EXPECTED_FLOOR,
+        _GRID_ABSTAIN_MARGIN,
         _GRID_DISAGREEMENT,
         _GRID_NEWS_CUTOFF,
         _GRID_REGIME_CUTOFF,
@@ -217,10 +220,11 @@ def _policy_grid() -> list[dict]:
             {
                 "fusion_min_confidence": float(combo[0]),
                 "fusion_expected_return_floor": float(combo[1]),
-                "fusion_max_model_disagreement": float(combo[2]),
-                "fusion_news_risk_cutoff": float(combo[3]),
-                "fusion_regime_vix_cutoff": float(combo[4]),
-                "fusion_min_holding_bars": int(combo[5]),
+                "fusion_abstain_margin": float(combo[2]),
+                "fusion_max_model_disagreement": float(combo[3]),
+                "fusion_news_risk_cutoff": float(combo[4]),
+                "fusion_regime_vix_cutoff": float(combo[5]),
+                "fusion_min_holding_bars": int(combo[6]),
             }
         )
     return rows
@@ -230,7 +234,7 @@ def _fusion_config_from_policy(policy: dict) -> FusionConfig:
     return FusionConfig(
         min_confidence=float(policy["fusion_min_confidence"]),
         min_expected_return=float(policy["fusion_expected_return_floor"]),
-        abstain_margin=0.0,
+        abstain_margin=float(policy["fusion_abstain_margin"]),
         max_news_risk=float(policy["fusion_news_risk_cutoff"]),
         high_vol_vix_threshold=float(policy["fusion_regime_vix_cutoff"]),
         max_model_disagreement=float(policy["fusion_max_model_disagreement"]),
@@ -242,6 +246,7 @@ def _apply_policy(config, policy: dict):
     cfg.broker.backtest_model = "fusion"  # type: ignore[attr-defined]
     cfg.broker.fusion_min_confidence = policy["fusion_min_confidence"]
     cfg.broker.fusion_expected_return_floor = policy["fusion_expected_return_floor"]
+    cfg.broker.fusion_abstain_margin = policy["fusion_abstain_margin"]
     cfg.broker.fusion_max_model_disagreement = policy["fusion_max_model_disagreement"]
     cfg.broker.fusion_news_risk_cutoff = policy["fusion_news_risk_cutoff"]
     cfg.broker.fusion_regime_vix_cutoff = policy["fusion_regime_vix_cutoff"]
@@ -441,6 +446,7 @@ def _write_next_status(
         "## Best Validation Policy",
         f"- min_confidence: {best_validation_policy['policy']['fusion_min_confidence']}",
         f"- expected_return_floor: {best_validation_policy['policy']['fusion_expected_return_floor']}",
+        f"- abstain_margin: {best_validation_policy['policy']['fusion_abstain_margin']}",
         f"- max_model_disagreement: {best_validation_policy['policy']['fusion_max_model_disagreement']}",
         f"- news_risk_cutoff: {best_validation_policy['policy']['fusion_news_risk_cutoff']}",
         f"- regime_vix_cutoff: {best_validation_policy['policy']['fusion_regime_vix_cutoff']}",

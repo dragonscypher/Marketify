@@ -147,6 +147,18 @@ class TestFusionModel:
         assert score.abstain_flag is False
         assert score.expected_return > 0.0
 
+    def test_abstain_margin_tightens_edge_gate(self):
+        from marketify.models.fusion_model import FusionConfig, FusionPredictor
+
+        predictor = FusionPredictor(FusionConfig(min_expected_return=3e-4, abstain_margin=2e-4, min_confidence=0.1))
+        score = predictor.score(
+            tabular_score=0.0007,
+            sequence_score=0.0003,
+            sentiment_score=0.0,
+        )
+        assert score.abstain_flag is True
+        assert "weak_edge" in score.reason
+
     def test_abstain_when_news_risk_too_high(self):
         from marketify.models.fusion_model import FusionConfig, FusionPredictor
 
@@ -333,6 +345,7 @@ class TestMultimodalBenchmarkReports:
                 "policy": {
                     "fusion_min_confidence": 0.35,
                     "fusion_expected_return_floor": 0.00035,
+                    "fusion_abstain_margin": 0.00005,
                     "fusion_max_model_disagreement": 0.004,
                     "fusion_news_risk_cutoff": 0.70,
                     "fusion_regime_vix_cutoff": 28.0,
@@ -395,6 +408,8 @@ class TestMultimodalBenchmarkReports:
         assert (tmp_path / "fusion_policy_tuning.csv").exists()
         assert (tmp_path / "fusion_policy_tuning.md").exists()
         assert (tmp_path / "NEXT_STATUS.md").exists()
+        assert "fusion_abstain_margin" in (tmp_path / "fusion_policy_tuning.md").read_text(encoding="utf-8")
+        assert "abstain_margin" in (tmp_path / "NEXT_STATUS.md").read_text(encoding="utf-8")
 
 
 # ---------------------------------------------------------------------------
