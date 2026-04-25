@@ -96,6 +96,7 @@ class RealBenchmarkRow:
     final_trade_count: int = 0
     final_approval_count: int = 0
     final_keep_coverage_pct: float = 0.0
+    final_expectancy: float = 0.0
     gate_config_match: str = "YES"
     champion_eligible: bool = False
 
@@ -572,6 +573,7 @@ def _run_real_lane(
         final_trade_count=int(metrics["trade_count"]),
         final_approval_count=int(metrics["approval_count"]),
         final_keep_coverage_pct=keep_coverage_pct,
+        final_expectancy=float(metrics["expectancy"]),
         gate_config_match=_gate_config_match(selected_gate, applied_gate),
         champion_eligible=False,
     )
@@ -643,6 +645,7 @@ def _failed_model_row(model_name: str, notes: str) -> RealBenchmarkRow:
         final_trade_count=0,
         final_approval_count=0,
         final_keep_coverage_pct=0.0,
+        final_expectancy=0.0,
         gate_config_match="YES",
         champion_eligible=False,
     )
@@ -958,6 +961,7 @@ def _build_benchmark_summary(champion_row: RealBenchmarkRow | None, display_row:
         "final_trade_count": display_row.final_trade_count,
         "final_approval_count": display_row.final_approval_count,
         "final_keep_coverage_pct": display_row.final_keep_coverage_pct,
+        "final_expectancy": display_row.final_expectancy,
         "gate_config_match": display_row.gate_config_match,
         "average_edge_kept": display_row.average_edge_kept,
         "average_edge_rejected": display_row.average_edge_rejected,
@@ -980,12 +984,12 @@ def build_model_leaderboard_markdown(
         "Real traded path only. xgb primary lane. recurrent/news/regime remain support or veto only.",
         f"current_champion: {current_champion}",
         "",
-        "| model_name | role | weekly_return_pct | sharpe | max_drawdown_pct | trade_count | approval_count | keep_coverage_pct | selected_max_disagreement | applied_max_disagreement | selected_approval_precision_threshold | applied_approval_precision_threshold | gate_config_match | rejected_by_disagreement_count | disagreement_reject_rate | keep_rate_by_disagreement_bucket | approval_precision_top_half | approval_precision_bottom_half | expectancy_by_confidence_bucket | pnl_by_confidence_bucket | PASS/FAIL | exact_blocker | notes |",
-        "| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- | ---: | ---: | --- | ---: | ---: | --- | --- | --- | --- | --- |",
+        "| model_name | role | weekly_return_pct | sharpe | max_drawdown_pct | trade_count | approval_count | keep_coverage_pct | selected_max_disagreement | applied_max_disagreement | selected_approval_precision_threshold | applied_approval_precision_threshold | gate_config_match | final_expectancy | rejected_by_disagreement_count | disagreement_reject_rate | keep_rate_by_disagreement_bucket | approval_precision_top_half | approval_precision_bottom_half | expectancy_by_confidence_bucket | pnl_by_confidence_bucket | PASS/FAIL | exact_blocker | notes |",
+        "| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- | ---: | ---: | ---: | --- | ---: | ---: | --- | --- | --- | --- | --- |",
     ]
     for record in _build_model_compare_records(rows):
         lines.append(
-            f"| {record['model_name']} | {record['role']} | {_fmt_metric(record['weekly_return_pct'])} | {_fmt_metric(record['sharpe'])} | {_fmt_metric(record['max_drawdown_pct'])} | {record['trade_count']} | {record['approval_count']} | {_fmt_metric(record['keep_coverage_pct'], digits=2)} | {_fmt_metric(record['selected_max_disagreement'], digits=6)} | {_fmt_metric(record['applied_max_disagreement'], digits=6)} | {_fmt_metric(record['selected_approval_precision_threshold'], digits=6)} | {_fmt_metric(record['applied_approval_precision_threshold'], digits=6)} | {record['gate_config_match']} | {record['rejected_by_disagreement_count']} | {_fmt_metric(record['disagreement_reject_rate'], digits=2)} | {record['keep_rate_by_disagreement_bucket']} | {_fmt_metric(record['approval_precision_top_half'], digits=2)} | {_fmt_metric(record['approval_precision_bottom_half'], digits=2)} | {record['expectancy_by_confidence_bucket']} | {record['pnl_by_confidence_bucket']} | {record['PASS_FAIL']} | {record['exact_blocker']} | {record['notes']} |"
+            f"| {record['model_name']} | {record['role']} | {_fmt_metric(record['weekly_return_pct'])} | {_fmt_metric(record['sharpe'])} | {_fmt_metric(record['max_drawdown_pct'])} | {record['trade_count']} | {record['approval_count']} | {_fmt_metric(record['keep_coverage_pct'], digits=2)} | {_fmt_metric(record['selected_max_disagreement'], digits=6)} | {_fmt_metric(record['applied_max_disagreement'], digits=6)} | {_fmt_metric(record['selected_approval_precision_threshold'], digits=6)} | {_fmt_metric(record['applied_approval_precision_threshold'], digits=6)} | {record['gate_config_match']} | {_fmt_metric(record['final_expectancy'], digits=6)} | {record['rejected_by_disagreement_count']} | {_fmt_metric(record['disagreement_reject_rate'], digits=2)} | {record['keep_rate_by_disagreement_bucket']} | {_fmt_metric(record['approval_precision_top_half'], digits=2)} | {_fmt_metric(record['approval_precision_bottom_half'], digits=2)} | {record['expectancy_by_confidence_bucket']} | {record['pnl_by_confidence_bucket']} | {record['PASS_FAIL']} | {record['exact_blocker']} | {record['notes']} |"
         )
     lines += [
         "",
@@ -1031,6 +1035,7 @@ def build_real_benchmark_markdown(
         f"final_trade_count: {summary['final_trade_count']}",
         f"final_approval_count: {summary['final_approval_count']}",
         f"final_keep_coverage_pct: {_fmt_metric(summary['final_keep_coverage_pct'], digits=2)}",
+        f"final_expectancy: {_fmt_metric(summary['final_expectancy'], digits=6)}",
         f"gate_config_match: {summary['gate_config_match']}",
         f"average_edge_kept: {_fmt_metric(summary['average_edge_kept'], digits=6)}",
         f"average_edge_rejected: {_fmt_metric(summary['average_edge_rejected'], digits=6)}",
@@ -1097,6 +1102,7 @@ def build_next_status_markdown(
         f"- final_trade_count: {summary['final_trade_count']}",
         f"- final_approval_count: {summary['final_approval_count']}",
         f"- final_keep_coverage_pct: {_fmt_metric(summary['final_keep_coverage_pct'], digits=2)}",
+        f"- final_expectancy: {_fmt_metric(summary['final_expectancy'], digits=6)}",
         f"- gate_config_match: {summary['gate_config_match']}",
         f"- average_edge_kept: {_fmt_metric(summary['average_edge_kept'], digits=6)}",
         f"- average_edge_rejected: {_fmt_metric(summary['average_edge_rejected'], digits=6)}",
@@ -1422,6 +1428,7 @@ def _write_false_positive_trade_review(
         f"- final_trade_count: {xgb_row.final_trade_count}",
         f"- final_approval_count: {xgb_row.final_approval_count}",
         f"- final_keep_coverage_pct: {_fmt_metric(xgb_row.final_keep_coverage_pct, digits=2)}",
+        f"- final_expectancy: {_fmt_metric(xgb_row.final_expectancy, digits=6)}",
         f"- gate_config_match: {xgb_row.gate_config_match}",
         f"- expectancy_by_confidence_bucket: {diag_precision['expectancy_by_confidence_bucket']}",
         f"- pnl_by_confidence_bucket: {diag_precision['pnl_by_confidence_bucket']}",

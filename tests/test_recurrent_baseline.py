@@ -456,6 +456,7 @@ def test_next_status_reports_exact_fail_gap_for_xgb_real_path():
         final_trade_count=10,
         final_approval_count=10,
         final_keep_coverage_pct=7.2,
+        final_expectancy=1.0,
         gate_config_match="YES",
     )
 
@@ -480,6 +481,7 @@ def test_next_status_reports_exact_fail_gap_for_xgb_real_path():
     assert "final_trade_count: 10" in md
     assert "final_approval_count: 10" in md
     assert "final_keep_coverage_pct: 7.20" in md
+    assert "final_expectancy: 1.000000" in md
     assert "gate_config_match: YES" in md
     assert "gap to 1.0% target: 0.3023 percentage points" in md
     assert "result: FAIL" in md
@@ -524,6 +526,7 @@ def _make_real_benchmark_row(model_name: str = "xgb", **overrides):
         final_trade_count=10,
         final_approval_count=10,
         final_keep_coverage_pct=7.2,
+        final_expectancy=1.0,
         gate_config_match="YES",
     )
     defaults.update(overrides)
@@ -563,6 +566,7 @@ def test_real_benchmark_markdown_includes_required_same_path_fields():
     assert "final_trade_count: 10" in md
     assert "final_approval_count: 10" in md
     assert "final_keep_coverage_pct: 7.20" in md
+    assert "final_expectancy: 1.000000" in md
     assert "gate_config_match: YES" in md
     assert "fusion_reference_only" in md
     assert "reference only; never champion until deployable same-path semantics proven" in md
@@ -600,6 +604,7 @@ def test_model_leaderboard_markdown_uses_canonical_name_and_gate_fields():
     assert "selected_approval_precision_threshold" in md
     assert "applied_approval_precision_threshold" in md
     assert "gate_config_match" in md
+    assert "final_expectancy" in md
     assert "rejected_by_disagreement_count" in md
     assert "disagreement_reject_rate" in md
     assert "keep_rate_by_disagreement_bucket" in md
