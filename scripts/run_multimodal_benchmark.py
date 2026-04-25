@@ -13,16 +13,21 @@ Policy tuning rules:
   - deterministic only; no self-modification
 
 Outputs:
-  reports/fusion_policy_tuning.csv
-  reports/fusion_policy_tuning.md
-    reports/xgb_real_leaderboard.csv
-    reports/xgb_real_leaderboard.md
-  reports/multimodal_leaderboard.csv
-  reports/multimodal_leaderboard.md
-  reports/multimodal_real_benchmark.md
+  reports/validation_policy_tuning.csv
+  reports/validation_policy_tuning.md
+  reports/xgb_real_leaderboard.csv
+  reports/xgb_real_leaderboard.md
+  reports/model_leaderboard.csv
+  reports/model_leaderboard.md
+  reports/real_trading_benchmark.md
   reports/NEXT_STATUS.md
   reports/multimodal_trades.csv
   reports/multimodal_equity_curve.csv
+
+Champion eligibility rules:
+  - trade_count > 0 (reject phantom-pass from over-abstained fusion)
+  - expectancy > 0
+  - keep_coverage >= MIN_KEEP_COVERAGE_PCT
 """
 from __future__ import annotations
 
@@ -49,6 +54,7 @@ REPORTS = ROOT / "reports"
 WEEKLY_GOAL = 0.01
 DAILY_GOAL = 0.01
 VALIDATION_FRACTION = 0.15
+MIN_KEEP_COVERAGE_PCT = 5.0  # min % of total periods that must have an approved trade
 
 _GRID_MIN_CONFIDENCE = [0.30, 0.35]
 _GRID_EXPECTED_FLOOR = [0.00030, 0.00035]
@@ -143,6 +149,13 @@ def _compute_extended_metrics(
     weekly_pass = weekly_ret >= weekly_goal
     daily_pass = daily_ret >= daily_goal
 
+    # approval_count: trades executed on real path (paper-mode approvals)
+    approval_count = trade_count
+
+    # keep_coverage: % of total equity bars that had an approved trade
+    total_bars = max(len(eq) - 1, 1)
+    keep_coverage_pct = round(trade_count / total_bars * 100.0, 2)
+
     return {
         "weekly_return_pct": round(weekly_ret * 100, 4),
         "daily_return_pct": round(daily_ret * 100, 4),
@@ -151,6 +164,8 @@ def _compute_extended_metrics(
         "max_drawdown_pct": round(max_dd * 100, 4),
         "cvar_95_pct": round(cvar * 100, 4),
         "trade_count": trade_count,
+        "approval_count": approval_count,
+        "keep_coverage_pct": keep_coverage_pct,
         "win_rate_pct": round(win_rate, 2),
         "expectancy": round(expectancy, 4),
         "weekly_pass": weekly_pass,
@@ -160,6 +175,23 @@ def _compute_extended_metrics(
         "target_weekly_pct": round(weekly_goal * 100, 2),
         "target_daily_pct": round(daily_goal * 100, 2),
     }
+
+
+def _is_eligible_for_champion(row: dict, metrics_key: str = "metrics") -> bool:
+    """Reject candidates with zero trades, non-positive expectancy, or insufficient coverage.
+
+    A phantom PASS can occur when over-tightened abstain gates produce 0 trades
+    and the equity curve never moves — giving inflated returns on a flat line.
+    These must be labelled INVALID_FOR_CHAMPION_SELECTION and excluded.
+    """
+    m = row[metrics_key]
+    if int(m.get("trade_count", 0)) <= 0:
+        return False
+    if float(m.get("expectancy", 0.0)) <= 0.0:
+        return False
+    if float(m.get("keep_coverage_pct", 0.0)) < MIN_KEEP_COVERAGE_PCT:
+        return False
+    return True
 
 
 def _pick_best_model(rows: list[dict], metrics_key: str = "metrics") -> dict:
@@ -175,7 +207,12 @@ def _pick_best_model(rows: list[dict], metrics_key: str = "metrics") -> dict:
             int(m.get("trade_count", 0)),
         )
 
-    return sorted(rows, key=_key, reverse=True)[0]
+    eligible = [r for r in rows if _is_eligible_for_champion(r, metrics_key)]
+    if not eligible:
+        # All candidates ineligible — fall back to row with most trades to avoid silent phantom win
+        eligible = sorted(rows, key=lambda r: int(r[metrics_key].get("trade_count", 0)), reverse=True)[:1]
+
+    return sorted(eligible, key=_key, reverse=True)[0]
 
 
 def _validation_start_index(n_rows: int) -> int:
@@ -300,20 +337,22 @@ def _write_leaderboard(rows: list[dict], reports_dir: Path) -> None:
         "weekly_return_pct", "daily_return_pct",
         "sharpe_ratio", "sortino_ratio",
         "max_drawdown_pct", "cvar_95_pct",
-        "trade_count", "win_rate_pct", "expectancy",
-        "weekly_status", "daily_status",
+        "trade_count", "approval_count", "keep_coverage_pct",
+        "win_rate_pct", "expectancy",
+        "weekly_status", "champion_eligible",
     ]
     records = []
     for row in rows:
         rec = {"model": row["model"]}
-        rec.update({k: row["metrics"].get(k, "") for k in cols if k != "model"})
+        rec.update({k: row["metrics"].get(k, "") for k in cols if k not in ("model", "champion_eligible")})
+        rec["champion_eligible"] = _is_eligible_for_champion(row)
         records.append(rec)
 
     df = pd.DataFrame(records)
-    df.to_csv(reports_dir / "multimodal_leaderboard.csv", index=False)
+    df.to_csv(reports_dir / "model_leaderboard.csv", index=False)
 
-    md_lines = ["# Multimodal Model Leaderboard", ""]
-    md_lines.append("Selection rule: fusion policy selected on validation slice only. Metrics below use final real benchmark path.")
+    md_lines = ["# Model Leaderboard", ""]
+    md_lines.append("Champion eligibility: trade_count > 0, expectancy > 0, keep_coverage >= 5%. Fusion policy selected on validation slice only.")
     md_lines.append("")
     header = "| " + " | ".join(cols) + " |"
     sep = "| " + " | ".join(["---"] * len(cols)) + " |"
@@ -321,57 +360,68 @@ def _write_leaderboard(rows: list[dict], reports_dir: Path) -> None:
     for rec in records:
         md_lines.append("| " + " | ".join(str(rec.get(c, "")) for c in cols) + " |")
     md_lines.append("")
-    (reports_dir / "multimodal_leaderboard.md").write_text("\n".join(md_lines), encoding="utf-8")
+    (reports_dir / "model_leaderboard.md").write_text("\n".join(md_lines), encoding="utf-8")
 
 
 def _write_real_benchmark_md(best: dict, all_rows: list[dict], reports_dir: Path) -> None:
     m = best["metrics"]
     gap = round(float(m["target_weekly_pct"]) - float(m["weekly_return_pct"]), 4)
     ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    is_eligible = _is_eligible_for_champion(best)
+    invalid_label = "" if is_eligible else "INVALID_FOR_CHAMPION_SELECTION (trade_count=0 or expectancy<=0)"
 
     lines = [
-        "# Multimodal Real Benchmark",
+        "# Real Trading Benchmark",
         "",
         f"Generated: {ts}",
         "",
-        "Fusion policy selected on validation slice only. Final numbers below use real benchmark path once.",
+        "Fusion policy selected on validation slice only. Final numbers use real benchmark path once.",
+        "Champion eligibility: trade_count > 0, expectancy > 0, keep_coverage >= 5%.",
         "",
         f"Best model: {best['model']}",
+    ]
+    if invalid_label:
+        lines.append(f"WARNING: {invalid_label}")
+    lines += [
         "",
-        f"Weekly return: {m['weekly_return_pct']}%  ->  {m['weekly_status']} (target: {m['target_weekly_pct']}%)",
-        f"Daily return:  {m['daily_return_pct']}%  ->  {m['daily_status']} (target: {m['target_daily_pct']}%)",
-        f"Sharpe:        {m['sharpe_ratio']}",
-        f"Sortino:       {m['sortino_ratio']}",
-        f"Max drawdown:  {m['max_drawdown_pct']}%",
-        f"CVaR 5%:       {m['cvar_95_pct']}%",
-        f"Trades:        {m['trade_count']}",
-        f"Win rate:      {m['win_rate_pct']}%",
-        f"Expectancy:    {m['expectancy']}",
+        f"Weekly return:   {m['weekly_return_pct']}%  ->  {m['weekly_status']} (target: {m['target_weekly_pct']}%)",
+        f"Daily return:    {m['daily_return_pct']}%",
+        f"Sharpe:          {m['sharpe_ratio']}",
+        f"Sortino:         {m['sortino_ratio']}",
+        f"Max drawdown:    {m['max_drawdown_pct']}%",
+        f"CVaR 5%:         {m['cvar_95_pct']}%",
+        f"Trades:          {m['trade_count']}",
+        f"Approval count:  {m.get('approval_count', m['trade_count'])}",
+        f"Keep coverage:   {m.get('keep_coverage_pct', 0.0)}%",
+        f"Win rate:        {m['win_rate_pct']}%",
+        f"Expectancy:      {m['expectancy']}",
         "",
         "## All models",
         "",
-        "| Model | Weekly% | Daily% | Sharpe | Sortino | Max DD% | CVaR 5% | Trades | Win Rate% | Weekly |",
-        "| ----- | ------- | ------ | ------ | ------- | ------- | ------- | ------ | --------- | ------ |",
+        "| Model | Weekly% | Daily% | Sharpe | Sortino | Max DD% | CVaR 5% | Trades | Approval | Coverage% | Expectancy | Weekly | Eligible |",
+        "| ----- | ------- | ------ | ------ | ------- | ------- | ------- | ------ | -------- | --------- | ---------- | ------ | -------- |",
     ]
     for row in all_rows:
         r = row["metrics"]
+        eligible_flag = "YES" if _is_eligible_for_champion(row) else "NO"
         lines.append(
             f"| {row['model']} | {r['weekly_return_pct']} | {r['daily_return_pct']} | {r['sharpe_ratio']} | "
             f"{r['sortino_ratio']} | {r['max_drawdown_pct']} | {r['cvar_95_pct']} | {r['trade_count']} | "
-            f"{r['win_rate_pct']} | {r['weekly_status']} |"
+            f"{r.get('approval_count', r['trade_count'])} | {r.get('keep_coverage_pct', 0.0)} | "
+            f"{r['expectancy']} | {r['weekly_status']} | {eligible_flag} |"
         )
 
-    if not m["weekly_pass"]:
+    if not m["weekly_pass"] or not is_eligible:
         lines += [
             "",
-            "WARNING: FAIL - weekly return below 1% target.",
+            "WARNING: FAIL - weekly return below 1% target or model ineligible.",
             f"Actual: {m['weekly_return_pct']}%.  Target: {m['target_weekly_pct']}%.",
             f"Gap: {gap} percentage points.",
             "No profit claims made. Continue improving decision quality only.",
         ]
 
     lines.append("")
-    (reports_dir / "multimodal_real_benchmark.md").write_text("\n".join(lines), encoding="utf-8")
+    (reports_dir / "real_trading_benchmark.md").write_text("\n".join(lines), encoding="utf-8")
 
 
 def _write_fusion_policy_tuning(rows: list[dict], reports_dir: Path) -> None:
@@ -379,6 +429,7 @@ def _write_fusion_policy_tuning(rows: list[dict], reports_dir: Path) -> None:
     for row in rows:
         p = row["policy"]
         m = row["metrics"]
+        eligible = _is_eligible_for_champion(row)
         records.append(
             {
                 **p,
@@ -390,32 +441,34 @@ def _write_fusion_policy_tuning(rows: list[dict], reports_dir: Path) -> None:
                 "validation_cvar_95_pct": m["cvar_95_pct"],
                 "validation_trade_count": m["trade_count"],
                 "validation_win_rate_pct": m["win_rate_pct"],
-                "validation_weekly_status": m["weekly_status"],
+                "validation_keep_coverage_pct": m.get("keep_coverage_pct", 0.0),
+                "champion_eligible": eligible,
+                "validation_weekly_status": m["weekly_status"] if eligible else "INVALID_FOR_CHAMPION_SELECTION",
                 "validation_start_ts": row.get("validation_start_ts", ""),
             }
         )
 
     if not records:
-        pd.DataFrame().to_csv(reports_dir / "fusion_policy_tuning.csv", index=False)
-        (reports_dir / "fusion_policy_tuning.md").write_text("# Fusion Policy Tuning\n\nNo rows.\n", encoding="utf-8")
+        pd.DataFrame().to_csv(reports_dir / "validation_policy_tuning.csv", index=False)
+        (reports_dir / "validation_policy_tuning.md").write_text("# Validation Policy Tuning\n\nNo rows.\n", encoding="utf-8")
         return
 
     df = pd.DataFrame(records).sort_values(
-        by=["validation_weekly_return_pct", "validation_sharpe_ratio", "validation_max_drawdown_pct", "validation_trade_count"],
-        ascending=[False, False, True, False],
+        by=["champion_eligible", "validation_weekly_return_pct", "validation_sharpe_ratio", "validation_max_drawdown_pct", "validation_trade_count"],
+        ascending=[False, False, False, True, False],
     )
-    df.to_csv(reports_dir / "fusion_policy_tuning.csv", index=False)
+    df.to_csv(reports_dir / "validation_policy_tuning.csv", index=False)
 
     cols = list(df.columns)
-    md_lines = ["# Fusion Policy Tuning", ""]
-    md_lines.append("Validation slice only. Full benchmark path hidden until final selected policy run.")
+    md_lines = ["# Validation Policy Tuning", ""]
+    md_lines.append("Validation slice only. Ineligible combos (0 trades / non-positive expectancy) labelled INVALID_FOR_CHAMPION_SELECTION.")
     md_lines.append("")
     md_lines.append("| " + " | ".join(cols) + " |")
     md_lines.append("| " + " | ".join(["---"] * len(cols)) + " |")
     for _, rec in df.iterrows():
         md_lines.append("| " + " | ".join(str(rec[c]) for c in cols) + " |")
     md_lines.append("")
-    (reports_dir / "fusion_policy_tuning.md").write_text("\n".join(md_lines), encoding="utf-8")
+    (reports_dir / "validation_policy_tuning.md").write_text("\n".join(md_lines), encoding="utf-8")
 
 
 def _write_xgb_real_leaderboard(xgb_rows: list[object], reports_dir: Path) -> None:
@@ -466,6 +519,8 @@ def _write_next_status(
     gap = round(float(t["target_weekly_pct"]) - float(t["weekly_return_pct"]), 4)
     current_gap = round(float(w["target_weekly_pct"]) - float(w["weekly_return_pct"]), 4)
     exact_blocker = _build_exact_blocker(w, xgb_primary)
+    champion_eligible = _is_eligible_for_champion(winner)
+    invalid_label = "" if champion_eligible else "INVALID_FOR_CHAMPION_SELECTION (trade_count=0 or expectancy<=0)"
 
     lines = [
         "# NEXT STATUS",
@@ -481,10 +536,16 @@ def _write_next_status(
         f"- max drawdown: {w['max_drawdown_pct']}%",
         f"- cvar_95: {w['cvar_95_pct']}%",
         f"- trade count: {w['trade_count']}",
+        f"- approval count: {w.get('approval_count', w['trade_count'])}",
+        f"- expectancy: {w['expectancy']}",
         f"- win rate: {w['win_rate_pct']}%",
         f"- gap to 1.0% target: {current_gap} percentage points",
-        f"- result: {w['weekly_status']}",
+        f"- result: {'INVALID_FOR_CHAMPION_SELECTION' if invalid_label else w['weekly_status']}",
         f"- exact blocker: {exact_blocker}",
+    ]
+    if invalid_label:
+        lines.append(f"- WARNING: {invalid_label}")
+    lines += [
         "",
         "## Champion Path",
         f"- xgb_primary_single_model_weekly_return_pct: {getattr(xgb_primary, 'weekly_return_pct', '')}",
@@ -546,8 +607,11 @@ def _write_next_status(
         "## Numerical Reason",
         f"- win_rate_pct: {t['win_rate_pct']}",
         f"- expectancy: {t['expectancy']}",
+        f"- trade_count: {t['trade_count']}",
+        f"- approval_count: {t.get('approval_count', t['trade_count'])}",
         f"- drawdown_pct: {t['max_drawdown_pct']}",
         f"- cvar_95_pct: {t['cvar_95_pct']}",
+        f"- final_tuned_fusion_eligible: {_is_eligible_for_champion(final_tuned_fusion)}",
         f"- winner_lane_after_tuning: {winner['model']}",
         f"- winner_weekly_return_pct: {w['weekly_return_pct']}",
         f"- winner_weekly_status: {w['weekly_status']}",

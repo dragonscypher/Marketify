@@ -250,6 +250,8 @@ class TestMultimodalBenchmarkReports:
                     "max_drawdown_pct": 0.40,
                     "cvar_95_pct": 1.20,
                     "trade_count": 5,
+                    "approval_count": 5,
+                    "keep_coverage_pct": 10.0,
                     "win_rate_pct": 60.0,
                     "expectancy": 4.6,
                     "weekly_pass": False,
@@ -274,9 +276,9 @@ class TestMultimodalBenchmarkReports:
         mb._write_trades_and_equity(best["model"], rows, tmp_path)
 
         for fname in [
-            "multimodal_leaderboard.csv",
-            "multimodal_leaderboard.md",
-            "multimodal_real_benchmark.md",
+            "model_leaderboard.csv",
+            "model_leaderboard.md",
+            "real_trading_benchmark.md",
             "multimodal_trades.csv",
             "multimodal_equity_curve.csv",
         ]:
@@ -288,7 +290,7 @@ class TestMultimodalBenchmarkReports:
         rows = self._make_dummy_rows(tmp_path)
         best = rows[0]
         mb._write_real_benchmark_md(best, rows, tmp_path)
-        content = (tmp_path / "multimodal_real_benchmark.md").read_text()
+        content = (tmp_path / "real_trading_benchmark.md").read_text()
         assert "FAIL" in content
         assert "0.25" in content  # actual weekly return present
 
@@ -307,6 +309,8 @@ class TestMultimodalBenchmarkReports:
                     "max_drawdown_pct": 0.30,
                     "cvar_95_pct": 0.80,
                     "trade_count": 20,
+                    "approval_count": 20,
+                    "keep_coverage_pct": 10.0,
                     "win_rate_pct": 65.0,
                     "expectancy": 12.0,
                     "weekly_pass": True,
@@ -322,7 +326,7 @@ class TestMultimodalBenchmarkReports:
         ]
         best = rows[0]
         mb._write_real_benchmark_md(best, rows, tmp_path)
-        content = (tmp_path / "multimodal_real_benchmark.md").read_text()
+        content = (tmp_path / "real_trading_benchmark.md").read_text()
         assert "PASS" in content
         # Weekly PASS → no WARNING block should appear
         assert "WARNING: FAIL" not in content
@@ -332,9 +336,11 @@ class TestMultimodalBenchmarkReports:
 
         rows = [
             {"model": "ridge", "metrics": {"weekly_return_pct": 0.5, "sharpe_ratio": 0.4,
-                                           "max_drawdown_pct": 0.3, "trade_count": 10}},
+                                           "max_drawdown_pct": 0.3, "trade_count": 10,
+                                           "expectancy": 1.0, "keep_coverage_pct": 10.0}},
             {"model": "fusion", "metrics": {"weekly_return_pct": 0.9, "sharpe_ratio": 0.3,
-                                            "max_drawdown_pct": 0.2, "trade_count": 5}},
+                                            "max_drawdown_pct": 0.2, "trade_count": 5,
+                                            "expectancy": 1.0, "keep_coverage_pct": 10.0}},
         ]
         best = mb._pick_best_model(rows)
         assert best["model"] == "fusion"
@@ -353,6 +359,7 @@ class TestMultimodalBenchmarkReports:
                     "win_rate_pct": 51.0,
                     "expectancy": 0.5,
                     "trade_count": 12,
+                    "keep_coverage_pct": 10.0,
                 },
             },
             {
@@ -365,12 +372,80 @@ class TestMultimodalBenchmarkReports:
                     "win_rate_pct": 55.0,
                     "expectancy": 0.7,
                     "trade_count": 12,
+                    "keep_coverage_pct": 10.0,
                 },
             },
         ]
 
         best = mb._pick_best_model(rows)
         assert best["model"] == "fusion"
+
+    def test_zero_trade_model_ineligible_for_champion(self):
+        import scripts.run_multimodal_benchmark as mb
+
+        zero_trade_row = {
+            "model": "fusion",
+            "metrics": {
+                "weekly_return_pct": 9.9247,  # phantom PASS — abstain gates blocked all trades
+                "sharpe_ratio": 0.0,
+                "max_drawdown_pct": 0.0,
+                "cvar_95_pct": 0.0,
+                "win_rate_pct": 0.0,
+                "expectancy": 0.0,
+                "trade_count": 0,
+                "keep_coverage_pct": 0.0,
+            },
+        }
+        assert mb._is_eligible_for_champion(zero_trade_row) is False
+
+        real_xgb_row = {
+            "model": "xgb",
+            "metrics": {
+                "weekly_return_pct": 1.7937,
+                "sharpe_ratio": 1.0619,
+                "max_drawdown_pct": 0.7802,
+                "expectancy": 0.5,
+                "trade_count": 14,
+                "keep_coverage_pct": 10.0,
+            },
+        }
+        assert mb._is_eligible_for_champion(real_xgb_row) is True
+
+        best = mb._pick_best_model([zero_trade_row, real_xgb_row])
+        assert best["model"] == "xgb"
+
+    def test_invalid_label_in_real_trading_benchmark(self, tmp_path):
+        import scripts.run_multimodal_benchmark as mb
+
+        rows = [
+            {
+                "model": "fusion",
+                "metrics": {
+                    "weekly_return_pct": 9.9247,
+                    "daily_return_pct": 0.0,
+                    "sharpe_ratio": 0.0,
+                    "sortino_ratio": 0.0,
+                    "max_drawdown_pct": 0.0,
+                    "cvar_95_pct": 0.0,
+                    "trade_count": 0,
+                    "approval_count": 0,
+                    "keep_coverage_pct": 0.0,
+                    "win_rate_pct": 0.0,
+                    "expectancy": 0.0,
+                    "weekly_pass": True,  # phantom
+                    "daily_pass": False,
+                    "weekly_status": "PASS",
+                    "daily_status": "FAIL",
+                    "target_weekly_pct": 1.0,
+                    "target_daily_pct": 1.0,
+                },
+                "equity": pd.Series([10000.0] * 50),
+                "trade_diagnostics": pd.DataFrame({"pnl": pd.Series(dtype=float)}),
+            }
+        ]
+        mb._write_real_benchmark_md(rows[0], rows, tmp_path)
+        content = (tmp_path / "real_trading_benchmark.md").read_text()
+        assert "INVALID_FOR_CHAMPION_SELECTION" in content
 
     def test_xgb_real_leaderboard_files_written(self, tmp_path):
         import scripts.run_multimodal_benchmark as mb
@@ -464,6 +539,8 @@ class TestMultimodalBenchmarkReports:
                     "trade_count": 12,
                     "win_rate_pct": 58.0,
                     "expectancy": 1.0,
+                    "keep_coverage_pct": 10.0,
+                    "approval_count": 12,
                     "weekly_pass": False,
                     "daily_pass": False,
                     "weekly_status": "FAIL",
@@ -484,6 +561,8 @@ class TestMultimodalBenchmarkReports:
                 "max_drawdown_pct": 0.7898,
                 "cvar_95_pct": 0.0556,
                 "trade_count": 45,
+                "approval_count": 45,
+                "keep_coverage_pct": 8.0,
                 "win_rate_pct": 55.56,
                 "expectancy": 1.2453,
                 "weekly_pass": False,
@@ -526,10 +605,10 @@ class TestMultimodalBenchmarkReports:
         mb._write_fusion_policy_tuning(tuning_rows, tmp_path)
         mb._write_next_status(xgb_primary, baseline, tuning_rows[0], tuned, winner, tmp_path)
 
-        assert (tmp_path / "fusion_policy_tuning.csv").exists()
-        assert (tmp_path / "fusion_policy_tuning.md").exists()
+        assert (tmp_path / "validation_policy_tuning.csv").exists()
+        assert (tmp_path / "validation_policy_tuning.md").exists()
         assert (tmp_path / "NEXT_STATUS.md").exists()
-        assert "fusion_abstain_margin" in (tmp_path / "fusion_policy_tuning.md").read_text(encoding="utf-8")
+        assert "fusion_abstain_margin" in (tmp_path / "validation_policy_tuning.md").read_text(encoding="utf-8")
         next_status = (tmp_path / "NEXT_STATUS.md").read_text(encoding="utf-8")
         assert "abstain_margin" in next_status
         assert "current champion: fusion" in next_status
@@ -538,6 +617,7 @@ class TestMultimodalBenchmarkReports:
         assert "daily return" in next_status
         assert "sortino" in next_status
         assert "win rate" in next_status
+        assert "approval count" in next_status
 
 
 # ---------------------------------------------------------------------------
