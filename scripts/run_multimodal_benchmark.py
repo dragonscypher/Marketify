@@ -423,6 +423,15 @@ def _write_real_benchmark_md(best: dict, all_rows: list[dict], reports_dir: Path
     lines.append("")
     (reports_dir / "real_trading_benchmark.md").write_text("\n".join(lines), encoding="utf-8")
 
+    # Also write CSV for downstream analysis
+    csv_records = []
+    for row in all_rows:
+        r = dict(row["metrics"])
+        r["model"] = row["model"]
+        r["champion_eligible"] = _is_eligible_for_champion(row)
+        csv_records.append(r)
+    pd.DataFrame(csv_records).to_csv(reports_dir / "real_trading_benchmark.csv", index=False)
+
 
 def _write_fusion_policy_tuning(rows: list[dict], reports_dir: Path) -> None:
     records: list[dict] = []
@@ -515,108 +524,147 @@ def _write_next_status(
     v = best_validation_policy["metrics"]
     t = final_tuned_fusion["metrics"]
     w = winner["metrics"]
-    delta = round(float(t["weekly_return_pct"]) - float(b["weekly_return_pct"]), 4)
-    gap = round(float(t["target_weekly_pct"]) - float(t["weekly_return_pct"]), 4)
+
+    winner_eligible = _is_eligible_for_champion(winner)
+    baseline_eligible = _is_eligible_for_champion(baseline_fusion)
+    tuned_eligible = _is_eligible_for_champion(final_tuned_fusion)
+    winner_label = winner["model"]  # "fusion_baseline" or "fusion_tuned"
+    invalid_label = "" if winner_eligible else "INVALID_FOR_CHAMPION_SELECTION (trade_count=0 or expectancy<=0)"
+
     current_gap = round(float(w["target_weekly_pct"]) - float(w["weekly_return_pct"]), 4)
     exact_blocker = _build_exact_blocker(w, xgb_primary)
-    champion_eligible = _is_eligible_for_champion(winner)
-    invalid_label = "" if champion_eligible else "INVALID_FOR_CHAMPION_SELECTION (trade_count=0 or expectancy<=0)"
+
+    # Candidate description from validation selection
+    vp = best_validation_policy["policy"]
+    val_eligible = _is_eligible_for_champion(best_validation_policy)
+    candidate_desc = (
+        f"fusion(conf={vp['fusion_min_confidence']}, floor={vp['fusion_expected_return_floor']}, "
+        f"disagree={vp['fusion_max_model_disagreement']}, news={vp['fusion_news_risk_cutoff']}, "
+        f"regime={vp['fusion_regime_vix_cutoff']}, hold={vp['fusion_min_holding_bars']}) "
+        f"validation_weekly={v['weekly_return_pct']}% trades={v['trade_count']}"
+    )
+    if not val_eligible:
+        candidate_desc += " INELIGIBLE_ON_VALIDATION_SLICE"
+
+    # Baseline vs tuned comparison note
+    baseline_vs_tuned_note = ""
+    if baseline_eligible and not tuned_eligible:
+        baseline_vs_tuned_note = (
+            f"NOTE: fusion_tuned ineligible (trade_count={t['trade_count']}, "
+            f"expectancy={t['expectancy']}); fusion_baseline selected as champion."
+        )
+    elif baseline_eligible and tuned_eligible:
+        if float(b["weekly_return_pct"]) > float(t["weekly_return_pct"]):
+            baseline_vs_tuned_note = (
+                f"NOTE: fusion_baseline ({b['weekly_return_pct']}%) outperforms "
+                f"fusion_tuned ({t['weekly_return_pct']}%) on real path. Champion = fusion_baseline."
+            )
 
     lines = [
         "# NEXT STATUS",
         "",
         "Scope: xgb primary single-model lane + deterministic fusion decision layer. No new models. No leverage increase.",
+        "Champion eligibility: trade_count > 0, expectancy > 0, keep_coverage >= 5%.",
+        "Champion selected from real-traded paths only (fusion_baseline, fusion_tuned).",
         "",
-        "## Current Champion",
-        f"- current champion: {winner['model']}",
-        f"- weekly return: {w['weekly_return_pct']}%",
-        f"- daily return: {w['daily_return_pct']}%",
-        f"- sharpe: {w['sharpe_ratio']}",
-        f"- sortino: {w['sortino_ratio']}",
-        f"- max drawdown: {w['max_drawdown_pct']}%",
-        f"- cvar_95: {w['cvar_95_pct']}%",
-        f"- trade count: {w['trade_count']}",
-        f"- approval count: {w.get('approval_count', w['trade_count'])}",
-        f"- expectancy: {w['expectancy']}",
-        f"- win rate: {w['win_rate_pct']}%",
-        f"- gap to 1.0% target: {current_gap} percentage points",
-        f"- result: {'INVALID_FOR_CHAMPION_SELECTION' if invalid_label else w['weekly_status']}",
-        f"- exact blocker: {exact_blocker}",
+        "## Decision",
+        f"- candidate_selected_from_validation: {candidate_desc}",
+        f"- final_real_traded_champion: {winner_label}",
+        f"- final_real_traded_weekly_return_pct: {w['weekly_return_pct']}%",
+        f"- final_real_traded_daily_return_pct: {w['daily_return_pct']}%",
+        f"- final_real_traded_sharpe: {w['sharpe_ratio']}",
+        f"- final_real_traded_sortino: {w['sortino_ratio']}",
+        f"- final_real_traded_max_drawdown_pct: {w['max_drawdown_pct']}%",
+        f"- final_real_traded_cvar_95_pct: {w['cvar_95_pct']}%",
+        f"- final_real_traded_trade_count: {w['trade_count']}",
+        f"- final_real_traded_approval_count: {w.get('approval_count', w['trade_count'])}",
+        f"- final_real_traded_expectancy: {w['expectancy']}",
+        f"- final_real_traded_keep_coverage_pct: {w.get('keep_coverage_pct', 0.0)}%",
+        f"- final_real_traded_weekly_status: {'INVALID_FOR_CHAMPION_SELECTION' if invalid_label else w['weekly_status']}",
+        f"- final_real_traded_eligible: {'YES' if winner_eligible else 'NO'}",
     ]
     if invalid_label:
         lines.append(f"- WARNING: {invalid_label}")
+
     lines += [
         "",
-        "## Champion Path",
-        f"- xgb_primary_single_model_weekly_return_pct: {getattr(xgb_primary, 'weekly_return_pct', '')}",
-        f"- xgb_primary_single_model_sharpe: {getattr(xgb_primary, 'sharpe', '')}",
-        f"- xgb_primary_single_model_max_drawdown_pct: {getattr(xgb_primary, 'max_drawdown_pct', '')}",
-        f"- xgb_primary_single_model_trade_count: {getattr(xgb_primary, 'trade_count', '')}",
+        "## Real Path Comparison",
+        f"- fusion_baseline_weekly_return_pct: {b['weekly_return_pct']}%",
+        f"- fusion_baseline_trade_count: {b['trade_count']}",
+        f"- fusion_baseline_approval_count: {b.get('approval_count', b['trade_count'])}",
+        f"- fusion_baseline_expectancy: {b['expectancy']}",
+        f"- fusion_baseline_sharpe: {b['sharpe_ratio']}",
+        f"- fusion_baseline_eligible: {'YES' if baseline_eligible else 'NO'}",
+        f"- fusion_baseline_weekly_status: {b['weekly_status']}",
+        f"- fusion_tuned_weekly_return_pct: {t['weekly_return_pct']}%",
+        f"- fusion_tuned_trade_count: {t['trade_count']}",
+        f"- fusion_tuned_approval_count: {t.get('approval_count', t['trade_count'])}",
+        f"- fusion_tuned_expectancy: {t['expectancy']}",
+        f"- fusion_tuned_sharpe: {t['sharpe_ratio']}",
+        f"- fusion_tuned_eligible: {'YES' if tuned_eligible else 'NO'}",
+        f"- fusion_tuned_weekly_status: {t['weekly_status'] if tuned_eligible else 'INVALID_FOR_CHAMPION_SELECTION'}",
+    ]
+    if baseline_vs_tuned_note:
+        lines.append(f"- {baseline_vs_tuned_note}")
+
+    lines += [
+        "",
+        "## Non-Comparable Reference Paths",
+        f"- xgb_primary_real_lane_weekly_return_pct: {getattr(xgb_primary, 'weekly_return_pct', 'N/A')}%"
+        " (NON_COMPARABLE: _run_real_lane evaluation, different method from fusion champion path)",
+        f"- xgb_primary_real_lane_sharpe: {getattr(xgb_primary, 'sharpe', 'N/A')}",
+        f"- xgb_primary_real_lane_trade_count: {getattr(xgb_primary, 'trade_count', 'N/A')}",
         "- recurrent_lane_role: support_context_only",
+        "- NOTE: xgb_primary stats shown for reference only; not used in champion selection",
         "",
-        "## Baseline Fusion (real benchmark path)",
-        f"- weekly_return_pct: {b['weekly_return_pct']}",
-        f"- daily_return_pct: {b['daily_return_pct']}",
-        f"- sharpe_ratio: {b['sharpe_ratio']}",
-        f"- sortino_ratio: {b['sortino_ratio']}",
-        f"- max_drawdown_pct: {b['max_drawdown_pct']}",
-        f"- cvar_95_pct: {b['cvar_95_pct']}",
-        f"- trade_count: {b['trade_count']}",
-        f"- weekly_status: {b['weekly_status']}",
-        "",
-        "## Best Validation Policy",
-        f"- min_confidence: {best_validation_policy['policy']['fusion_min_confidence']}",
-        f"- expected_return_floor: {best_validation_policy['policy']['fusion_expected_return_floor']}",
-        f"- abstain_margin: {best_validation_policy['policy']['fusion_abstain_margin']}",
-        f"- max_model_disagreement: {best_validation_policy['policy']['fusion_max_model_disagreement']}",
-        f"- news_risk_cutoff: {best_validation_policy['policy']['fusion_news_risk_cutoff']}",
-        f"- regime_vix_cutoff: {best_validation_policy['policy']['fusion_regime_vix_cutoff']}",
-        f"- min_holding_bars: {best_validation_policy['policy']['fusion_min_holding_bars']}",
-        f"- validation_weekly_return_pct: {v['weekly_return_pct']}",
+        "## Validation Policy Selected",
+        f"- min_confidence: {vp['fusion_min_confidence']}",
+        f"- expected_return_floor: {vp['fusion_expected_return_floor']}",
+        f"- abstain_margin: {vp['fusion_abstain_margin']}",
+        f"- max_model_disagreement: {vp['fusion_max_model_disagreement']}",
+        f"- news_risk_cutoff: {vp['fusion_news_risk_cutoff']}",
+        f"- regime_vix_cutoff: {vp['fusion_regime_vix_cutoff']}",
+        f"- min_holding_bars: {vp['fusion_min_holding_bars']}",
+        f"- validation_weekly_return_pct: {v['weekly_return_pct']}%",
         f"- validation_sharpe_ratio: {v['sharpe_ratio']}",
-        f"- validation_max_drawdown_pct: {v['max_drawdown_pct']}",
+        f"- validation_max_drawdown_pct: {v['max_drawdown_pct']}%",
         f"- validation_trade_count: {v['trade_count']}",
+        f"- validation_approval_count: {v.get('approval_count', v['trade_count'])}",
+        f"- validation_eligible: {'YES' if val_eligible else 'NO (INVALID_FOR_CHAMPION_SELECTION)'}",
+        "- NOTE: validation metrics shown for policy selection reference only; not champion metric",
         "",
-        "## Final Tuned Fusion (real benchmark path)",
-        f"- weekly_return_pct: {t['weekly_return_pct']}",
-        f"- daily_return_pct: {t['daily_return_pct']}",
-        f"- sharpe_ratio: {t['sharpe_ratio']}",
-        f"- sortino_ratio: {t['sortino_ratio']}",
-        f"- max_drawdown_pct: {t['max_drawdown_pct']}",
-        f"- cvar_95_pct: {t['cvar_95_pct']}",
-        f"- trade_count: {t['trade_count']}",
-        f"- win_rate_pct: {t['win_rate_pct']}",
-        f"- weekly_delta_vs_baseline_pct_points: {delta}",
+        "## Numerical Reason",
+        f"- final_real_traded_champion: {winner_label}",
+        f"- win_rate_pct: {w['win_rate_pct']}",
+        f"- expectancy: {w['expectancy']}",
+        f"- trade_count: {w['trade_count']}",
+        f"- approval_count: {w.get('approval_count', w['trade_count'])}",
+        f"- keep_coverage_pct: {w.get('keep_coverage_pct', 0.0)}%",
+        f"- drawdown_pct: {w['max_drawdown_pct']}%",
+        f"- cvar_95_pct: {w['cvar_95_pct']}%",
+        f"- gap_to_1pct_target: {current_gap} percentage_points",
+        f"- exact blocker: {exact_blocker}",
         "",
     ]
 
-    if t["weekly_pass"]:
+    if not winner_eligible:
+        lines += [
+            "Result: INVALID_FOR_CHAMPION_SELECTION",
+            "No eligible real-path model found. trade_count=0 or expectancy<=0.",
+        ]
+    elif w["weekly_pass"]:
         lines += [
             "Result: PASS",
-            f"Weekly {t['weekly_return_pct']}% >= {t['target_weekly_pct']}% target.",
+            f"Weekly {w['weekly_return_pct']}% >= {w['target_weekly_pct']}% target.",
         ]
     else:
         lines += [
             "Result: FAIL",
-            f"Weekly {t['weekly_return_pct']}% < {t['target_weekly_pct']}% target.",
-            f"Missing by: {gap} percentage points.",
+            f"Weekly {w['weekly_return_pct']}% < {w['target_weekly_pct']}% target.",
+            f"Missing by: {current_gap} percentage points.",
         ]
 
-    lines += [
-        "",
-        "## Numerical Reason",
-        f"- win_rate_pct: {t['win_rate_pct']}",
-        f"- expectancy: {t['expectancy']}",
-        f"- trade_count: {t['trade_count']}",
-        f"- approval_count: {t.get('approval_count', t['trade_count'])}",
-        f"- drawdown_pct: {t['max_drawdown_pct']}",
-        f"- cvar_95_pct: {t['cvar_95_pct']}",
-        f"- final_tuned_fusion_eligible: {_is_eligible_for_champion(final_tuned_fusion)}",
-        f"- winner_lane_after_tuning: {winner['model']}",
-        f"- winner_weekly_return_pct: {w['weekly_return_pct']}",
-        f"- winner_weekly_status: {w['weekly_status']}",
-        "",
-    ]
+    lines.append("")
     (reports_dir / "NEXT_STATUS.md").write_text("\n".join(lines), encoding="utf-8")
 
 
@@ -713,8 +761,10 @@ def main() -> int:
         policy=_default_policy(config),
         full_path=True,
     )
+    # Label for semantic path clarity
+    baseline_fusion["model"] = "fusion_baseline"
     print(
-        f"\n[multimodal] fusion baseline: weekly={baseline_fusion['metrics']['weekly_return_pct']}% "
+        f"\n[multimodal] fusion_baseline: weekly={baseline_fusion['metrics']['weekly_return_pct']}% "
         f"sharpe={baseline_fusion['metrics']['sharpe_ratio']} dd={baseline_fusion['metrics']['max_drawdown_pct']}% "
         f"trades={baseline_fusion['metrics']['trade_count']}"
     )
@@ -754,31 +804,55 @@ def main() -> int:
         policy=best_validation_policy["policy"],
         full_path=True,
     )
+    final_tuned_fusion["model"] = "fusion_tuned"
 
-    final_rows: list[dict] = []
-    for row in rows:
-        if row["model"] == "fusion":
-            final_rows.append(final_tuned_fusion)
-        else:
-            final_rows.append(row)
+    # Champion selection: real-path candidates only.
+    # fusion_baseline = default policy, full real path.
+    # fusion_tuned = validation-selected policy, full real path (may be ineligible if 0 trades).
+    real_candidate_rows = [baseline_fusion, final_tuned_fusion]
+    winner = _pick_best_model(real_candidate_rows)
 
-    best = _pick_best_model(final_rows)
-    print(f"\n[multimodal] Best model after fusion tuning: {best['model']}")
+    # Log if baseline beats tuned or tuned is ineligible
+    baseline_eligible = _is_eligible_for_champion(baseline_fusion)
+    tuned_eligible = _is_eligible_for_champion(final_tuned_fusion)
+    if baseline_eligible and not tuned_eligible:
+        print(
+            f"[champion] fusion_tuned ineligible (trade_count={final_tuned_fusion['metrics']['trade_count']}, "
+            f"expectancy={final_tuned_fusion['metrics']['expectancy']}). "
+            f"Champion = fusion_baseline ({baseline_fusion['metrics']['weekly_return_pct']}% weekly)."
+        )
+    elif baseline_eligible and tuned_eligible:
+        b_ret = float(baseline_fusion["metrics"]["weekly_return_pct"])
+        t_ret = float(final_tuned_fusion["metrics"]["weekly_return_pct"])
+        if b_ret > t_ret:
+            print(f"[champion] fusion_baseline ({b_ret}%) > fusion_tuned ({t_ret}%) on real path. Champion = fusion_baseline.")
+    print(f"\n[multimodal] Real-path champion: {winner['model']} weekly={winner['metrics']['weekly_return_pct']}%")
 
-    _write_leaderboard(final_rows, REPORTS)
-    _write_real_benchmark_md(best, final_rows, REPORTS)
-    _write_trades_and_equity(best["model"], final_rows, REPORTS)
-    _write_next_status(xgb_primary, baseline_fusion, best_validation_policy, final_tuned_fusion, best, REPORTS)
+    # Leaderboard: walk-forward comparison models + both real fusion paths
+    leaderboard_rows = list(rows) + [final_tuned_fusion]  # rows includes fusion_baseline
+    _write_leaderboard(leaderboard_rows, REPORTS)
+    _write_real_benchmark_md(winner, real_candidate_rows, REPORTS)
+
+    # Write trades/equity from champion row directly
+    trade_diag_out: pd.DataFrame = winner.get("trade_diagnostics", pd.DataFrame())
+    trade_diag_out.to_csv(REPORTS / "multimodal_trades.csv", index=False)
+    equity_out: pd.Series = winner.get("equity", pd.Series(dtype=float))
+    equity_df_out = equity_out.reset_index()
+    equity_df_out.columns = ["timestamp", "equity"]
+    equity_df_out.to_csv(REPORTS / "multimodal_equity_curve.csv", index=False)
+
+    _write_next_status(xgb_primary, baseline_fusion, best_validation_policy, final_tuned_fusion, winner, REPORTS)
 
     print(f"\nReports written to {REPORTS}/")
     for fname in [
-        "fusion_policy_tuning.csv",
-        "fusion_policy_tuning.md",
+        "validation_policy_tuning.csv",
+        "validation_policy_tuning.md",
         "xgb_real_leaderboard.csv",
         "xgb_real_leaderboard.md",
-        "multimodal_leaderboard.csv",
-        "multimodal_leaderboard.md",
-        "multimodal_real_benchmark.md",
+        "model_leaderboard.csv",
+        "model_leaderboard.md",
+        "real_trading_benchmark.csv",
+        "real_trading_benchmark.md",
         "NEXT_STATUS.md",
         "multimodal_trades.csv",
         "multimodal_equity_curve.csv",
@@ -786,10 +860,11 @@ def main() -> int:
         exists = (REPORTS / fname).exists()
         print(f"  {'OK' if exists else 'MISSING'}: {fname}")
 
-    winner_m = best["metrics"]
-    if not winner_m.get("weekly_pass"):
+    winner_m = winner["metrics"]
+    if not _is_eligible_for_champion(winner) or not winner_m.get("weekly_pass"):
+        status = "INELIGIBLE" if not _is_eligible_for_champion(winner) else "FAIL"
         print(
-            f"\n[FAIL] Weekly {winner_m['weekly_return_pct']}% < {winner_m['target_weekly_pct']}% target. "
+            f"\n[{status}] Weekly {winner_m['weekly_return_pct']}% (target {winner_m['target_weekly_pct']}%). "
             "Signal quality improvement required."
         )
         return 0

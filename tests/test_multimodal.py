@@ -278,6 +278,7 @@ class TestMultimodalBenchmarkReports:
         for fname in [
             "model_leaderboard.csv",
             "model_leaderboard.md",
+            "real_trading_benchmark.csv",
             "real_trading_benchmark.md",
             "multimodal_trades.csv",
             "multimodal_equity_curve.csv",
@@ -611,13 +612,13 @@ class TestMultimodalBenchmarkReports:
         assert "fusion_abstain_margin" in (tmp_path / "validation_policy_tuning.md").read_text(encoding="utf-8")
         next_status = (tmp_path / "NEXT_STATUS.md").read_text(encoding="utf-8")
         assert "abstain_margin" in next_status
-        assert "current champion: fusion" in next_status
-        assert "cvar_95" in next_status
+        assert "final_real_traded_champion" in next_status
+        assert "final_real_traded_cvar_95_pct" in next_status
         assert "exact blocker" in next_status
-        assert "daily return" in next_status
-        assert "sortino" in next_status
-        assert "win rate" in next_status
-        assert "approval count" in next_status
+        assert "final_real_traded_daily_return_pct" in next_status
+        assert "final_real_traded_sortino" in next_status
+        assert "win_rate_pct" in next_status
+        assert "final_real_traded_approval_count" in next_status
 
 
 # ---------------------------------------------------------------------------
