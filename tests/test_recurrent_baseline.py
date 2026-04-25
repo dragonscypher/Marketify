@@ -442,7 +442,9 @@ def test_next_status_reports_exact_fail_gap_for_xgb_real_path():
         approval_count=10,
         keep_coverage_pct=7.2,
         cost_buffer_reject_rate=40.0,
+        disagreement_reject_rate=12.5,
         keep_rate_by_gate="kept=44.00%; below_cost_buffer=40.00%",
+        keep_rate_by_disagreement_bucket="kept=44.00%; disagreement_rejected=12.50%",
         approval_precision_top_half=80.0,
         approval_precision_bottom_half=20.0,
         expectancy_by_confidence_bucket="low=-2.0 (3); mid=-0.5 (3); high=1.5 (4)",
@@ -456,10 +458,9 @@ def test_next_status_reports_exact_fail_gap_for_xgb_real_path():
     assert "cvar_95_pct: 0.05" in md
     assert "approval_count: 10" in md
     assert "rejected_by_disagreement_count: 0" in md
-    assert "rejected_by_low_edge_count: 0" in md
+    assert "disagreement_reject_rate: 12.50" in md
+    assert "keep_rate_by_disagreement_bucket: kept=44.00%; disagreement_rejected=12.50%" in md
     assert "kept_trade_count: 0" in md
-    assert "cost_buffer_reject_rate: 40.00" in md
-    assert "keep_rate_by_gate: kept=44.00%; below_cost_buffer=40.00%" in md
     assert "approval_precision_top_half: 80.00" in md
     assert "approval_precision_bottom_half: 20.00" in md
     assert "expectancy_by_confidence_bucket: low=-2.0 (3); mid=-0.5 (3); high=1.5 (4)" in md
@@ -493,7 +494,9 @@ def _make_real_benchmark_row(model_name: str = "xgb", **overrides):
         approval_count=10,
         keep_coverage_pct=7.2,
         cost_buffer_reject_rate=40.0,
+        disagreement_reject_rate=12.5,
         keep_rate_by_gate="kept=44.00%; below_cost_buffer=40.00%",
+        keep_rate_by_disagreement_bucket="kept=44.00%; disagreement_rejected=12.50%",
         approval_precision_top_half=80.0,
         approval_precision_bottom_half=20.0,
         expectancy_by_confidence_bucket="low=-2.0 (3); mid=-0.5 (3); high=1.5 (4)",
@@ -522,9 +525,9 @@ def test_real_benchmark_markdown_includes_required_same_path_fields():
     assert "approval_count: 10" in md
     assert "rejected_by_disagreement_count: 0" in md
     assert "rejected_by_low_edge_count: 0" in md
+    assert "disagreement_reject_rate: 12.50" in md
+    assert "keep_rate_by_disagreement_bucket: kept=44.00%; disagreement_rejected=12.50%" in md
     assert "kept_trade_count: 0" in md
-    assert "cost_buffer_reject_rate: 40.00" in md
-    assert "keep_rate_by_gate: kept=44.00%; below_cost_buffer=40.00%" in md
     assert "approval_precision_top_half: 80.00" in md
     assert "approval_precision_bottom_half: 20.00" in md
     assert "expectancy_by_confidence_bucket: low=-2.0 (3); mid=-0.5 (3); high=1.5 (4)" in md
@@ -545,7 +548,9 @@ def test_model_leaderboard_markdown_uses_canonical_name_and_gate_fields():
         rejected_by_low_edge_count=2,
         kept_trade_count=7,
         cost_buffer_reject_rate=25.0,
+        disagreement_reject_rate=10.0,
         keep_rate_by_gate="kept=55.00%; below_cost_buffer=25.00%; model_disagreement=10.00%",
+        keep_rate_by_disagreement_bucket="kept=55.00%; disagreement_rejected=10.00%",
         approval_precision_top_half=66.67,
         approval_precision_bottom_half=33.33,
         expectancy_by_confidence_bucket="low=-1.0 (2); mid=0.5 (2); high=1.0 (3)",
@@ -559,15 +564,12 @@ def test_model_leaderboard_markdown_uses_canonical_name_and_gate_fields():
     assert "# Model Leaderboard" in md
     assert "current_champion: xgb" in md
     assert "rejected_by_disagreement_count" in md
-    assert "rejected_by_low_edge_count" in md
-    assert "kept_trade_count" in md
-    assert "cost_buffer_reject_rate" in md
-    assert "keep_rate_by_gate" in md
+    assert "disagreement_reject_rate" in md
+    assert "keep_rate_by_disagreement_bucket" in md
     assert "approval_precision_top_half" in md
     assert "approval_precision_bottom_half" in md
     assert "expectancy_by_confidence_bucket" in md
     assert "pnl_by_confidence_bucket" in md
-    assert "average_edge_kept" in md
 
 
 def test_signal_gate_tracks_disagreement_and_low_edge_counts():
@@ -616,12 +618,14 @@ def test_signal_gate_thresholds_allow_cost_buffer_and_precision_overrides():
         gate_overrides={
             "cost_buffer_floor": 0.0,
             "approval_precision_threshold": 0.42,
+            "max_disagreement": 0.009,
             "abstain_margin": 0.0,
         },
     )
 
     assert abs(float(thresholds["edge_floor"]) - fee_floor) < 1e-12
     assert float(thresholds["min_confidence"]) == 0.42
+    assert float(thresholds["max_disagreement"]) == 0.009
 
 
 def test_fusion_reference_only_is_not_champion_eligible():
