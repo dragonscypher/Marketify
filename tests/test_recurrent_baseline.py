@@ -634,6 +634,31 @@ def test_weekly_target_required_for_champion_eligibility():
     assert cm._is_eligible_for_champion(deployable) is True
 
 
+def test_reference_row_prefers_xgb_traded_lane_over_phantom_weekly():
+    import scripts.compare_models as cm
+
+    phantom = _make_real_benchmark_row(
+        model_name="ridge",
+        weekly_return_pct=8.5256,
+        trade_count=0,
+        approval_count=0,
+        keep_coverage_pct=0.0,
+        expectancy=0.0,
+    )
+    xgb_real = _make_real_benchmark_row(
+        model_name="xgb",
+        weekly_return_pct=7.1354,
+        trade_count=9,
+        approval_count=9,
+        keep_coverage_pct=0.46,
+        expectancy=-1.580444,
+    )
+
+    chosen = cm._select_reference_row([phantom, xgb_real])
+
+    assert chosen.model_name == "xgb"
+
+
 def test_approval_precision_diagnostics_bucket_confidence():
     import scripts.compare_models as cm
 

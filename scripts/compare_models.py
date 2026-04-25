@@ -275,7 +275,20 @@ def _select_champion(rows: list[RealBenchmarkRow]) -> RealBenchmarkRow | None:
 def _select_reference_row(rows: list[RealBenchmarkRow]) -> RealBenchmarkRow:
     if not rows:
         raise ValueError("rows must not be empty")
-    return sorted(rows, key=_champion_sort_key, reverse=True)[0]
+
+    def _reference_sort_key(row: RealBenchmarkRow) -> tuple[int, int, int, float, float, float, float, int]:
+        return (
+            int(not row.comparison_only),
+            int(row.model_name == "xgb"),
+            int(row.trade_count > 0 and row.approval_count > 0),
+            float(row.keep_coverage_pct),
+            float(row.expectancy),
+            float(row.weekly_return_pct),
+            -float(row.max_drawdown_pct),
+            int(row.trade_count),
+        )
+
+    return sorted(rows, key=_reference_sort_key, reverse=True)[0]
 
 
 def _signal_gate_thresholds(config, gate_overrides: dict[str, float] | None = None) -> dict[str, float]:
