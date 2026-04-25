@@ -337,6 +337,24 @@ class TestMultimodalBenchmarkReports:
         best = mb._pick_best_model(rows)
         assert best["model"] == "fusion"
 
+    def test_policy_grid_only_tunes_allowed_knobs(self):
+        import scripts.run_multimodal_benchmark as mb
+
+        base_policy = {
+            "fusion_min_confidence": 0.30,
+            "fusion_expected_return_floor": 0.0003,
+            "fusion_abstain_margin": 0.0,
+            "fusion_max_model_disagreement": 0.006,
+            "fusion_news_risk_cutoff": 0.75,
+            "fusion_regime_vix_cutoff": 30.0,
+            "fusion_min_holding_bars": 0,
+        }
+        rows = mb._policy_grid(base_policy)
+
+        assert rows
+        assert {row["fusion_max_model_disagreement"] for row in rows} == {0.006}
+        assert {row["fusion_abstain_margin"] for row in rows} == {0.0, 0.00005}
+
     def test_policy_tuning_and_next_status_files_written(self, tmp_path):
         import scripts.run_multimodal_benchmark as mb
 

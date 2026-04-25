@@ -50,7 +50,6 @@ VALIDATION_FRACTION = 0.15
 _GRID_MIN_CONFIDENCE = [0.30, 0.35]
 _GRID_EXPECTED_FLOOR = [0.00030, 0.00035]
 _GRID_ABSTAIN_MARGIN = [0.0, 0.00005]
-_GRID_DISAGREEMENT = [0.0040, 0.0060]
 _GRID_NEWS_CUTOFF = [0.70, 0.75]
 _GRID_REGIME_CUTOFF = [28.0, 30.0]
 _GRID_MIN_HOLDING_BARS = [0, 6]
@@ -205,13 +204,12 @@ def _default_policy(config) -> dict:
     }
 
 
-def _policy_grid() -> list[dict]:
+def _policy_grid(base_policy: dict) -> list[dict]:
     rows: list[dict] = []
     for combo in itertools.product(
         _GRID_MIN_CONFIDENCE,
         _GRID_EXPECTED_FLOOR,
         _GRID_ABSTAIN_MARGIN,
-        _GRID_DISAGREEMENT,
         _GRID_NEWS_CUTOFF,
         _GRID_REGIME_CUTOFF,
         _GRID_MIN_HOLDING_BARS,
@@ -221,10 +219,10 @@ def _policy_grid() -> list[dict]:
                 "fusion_min_confidence": float(combo[0]),
                 "fusion_expected_return_floor": float(combo[1]),
                 "fusion_abstain_margin": float(combo[2]),
-                "fusion_max_model_disagreement": float(combo[3]),
-                "fusion_news_risk_cutoff": float(combo[4]),
-                "fusion_regime_vix_cutoff": float(combo[5]),
-                "fusion_min_holding_bars": int(combo[6]),
+                "fusion_max_model_disagreement": float(base_policy["fusion_max_model_disagreement"]),
+                "fusion_news_risk_cutoff": float(combo[3]),
+                "fusion_regime_vix_cutoff": float(combo[4]),
+                "fusion_min_holding_bars": int(combo[5]),
             }
         )
     return rows
@@ -571,7 +569,7 @@ def main() -> int:
     )
     rows.append(baseline_fusion)
 
-    policy_grid = _policy_grid()
+    policy_grid = _policy_grid(_default_policy(config))
     print(f"\n[fusion-tuning] Running {len(policy_grid)} policy combos on validation slice only ...")
     tuned_rows: list[dict] = []
     for idx, policy in enumerate(policy_grid, start=1):
