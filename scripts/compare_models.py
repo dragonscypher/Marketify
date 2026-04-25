@@ -2001,12 +2001,9 @@ def main(argv: list[str] | None = None) -> int:
         encoding="utf-8",
     )
 
-    print(f"[COMPARE] csv={output_dir / 'model_compare_real.csv'}")
-    print(f"[COMPARE] summary_csv={output_dir / 'real_benchmark.csv'}")
     print(f"[COMPARE] leaderboard={output_dir / 'model_leaderboard.md'}")
     print(f"[COMPARE] benchmark={output_dir / 'real_benchmark.md'}")
     print(f"[COMPARE] false_positive={output_dir / 'false_positive_trade_review.md'}")
-    print(f"[COMPARE] feature_ablation={output_dir / 'feature_ablation.md'}")
     print(f"[COMPARE] next={output_dir / 'NEXT_STATUS.md'}")
     print(
         "[COMPARE] RESULT: "
