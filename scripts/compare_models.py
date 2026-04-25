@@ -280,10 +280,9 @@ def _select_reference_row(rows: list[RealBenchmarkRow]) -> RealBenchmarkRow:
 
 def _signal_gate_thresholds(config, gate_overrides: dict[str, float] | None = None) -> dict[str, float]:
     gate_overrides = gate_overrides or {}
-    cost_buffer = max(
-        float(config.risk.min_expected_return),
-        (float(config.broker.fee_bps) + float(config.broker.slippage_bps)) / 10000.0,
-    )
+    fee_floor = (float(config.broker.fee_bps) + float(config.broker.slippage_bps)) / 10000.0
+    base_cost_buffer = max(float(config.risk.min_expected_return), fee_floor)
+    cost_buffer = max(float(gate_overrides.get("cost_buffer_floor", base_cost_buffer)), fee_floor)
     abstain_margin = float(
         gate_overrides.get(
             "abstain_margin",
@@ -408,6 +407,7 @@ def _apply_signal_gate(
         "average_edge_kept": round(float(np.mean(edge_kept)), 6) if edge_kept else 0.0,
         "average_edge_rejected": round(float(np.mean(edge_rejected)), 6) if edge_rejected else 0.0,
         "cost_buffer_reject_rate": round((rejected_by_low_edge_count / scored) * 100.0, 2) if scored else 0.0,
+        "selected_cost_buffer_floor": float(thresholds["edge_floor"] - thresholds["abstain_margin"]),
         "selected_approval_precision_threshold": float(thresholds["min_confidence"]),
         "selected_max_disagreement": float(thresholds["max_disagreement"]),
         "selected_abstain_margin": float(thresholds["abstain_margin"]),
@@ -659,12 +659,21 @@ def _tune_real_path_gate_knobs(
     base_thresholds = _signal_gate_thresholds(config)
     base_abstain_margin = float(base_thresholds["abstain_margin"])
     base_min_confidence = float(base_thresholds["min_confidence"])
+    fee_floor = (float(config.broker.fee_bps) + float(config.broker.slippage_bps)) / 10000.0
+    base_cost_buffer = max(float(config.risk.min_expected_return), fee_floor)
 
     abstain_margin_candidates = sorted(
         {
             round(max(base_abstain_margin - 0.00005, 0.0), 6),
             round(base_abstain_margin, 6),
             round(base_abstain_margin + 0.00005, 6),
+        }
+    )
+    cost_buffer_floor_candidates = sorted(
+        {
+            round(max(base_cost_buffer - 0.00010, fee_floor), 6),
+            round(max(base_cost_buffer - 0.00005, fee_floor), 6),
+            round(base_cost_buffer, 6),
         }
     )
     approval_precision_threshold_candidates = sorted(
@@ -676,51 +685,57 @@ def _tune_real_path_gate_knobs(
     )
 
     best_overrides = {
+        "cost_buffer_floor": base_cost_buffer,
         "abstain_margin": base_abstain_margin,
         "approval_precision_threshold": base_min_confidence,
     }
     best_score: tuple[float, ...] | None = None
     best_row: RealBenchmarkRow | None = None
 
-    for approval_precision_threshold in approval_precision_threshold_candidates:
-        for abstain_margin in abstain_margin_candidates:
-            overrides = {
-                "abstain_margin": float(abstain_margin),
-                "approval_precision_threshold": float(approval_precision_threshold),
-            }
-            trial_row, _trial_result = _run_real_lane(
-                model_name="xgb",
-                feat=feat,
-                preds=xgb_preds,
-                config=config,
-                role="candidate",
-                comparison_preds=support_preds,
-                gate_overrides=overrides,
-                notes="xgb primary lane gate calibration",
-            )
-            score = (
-                float(int(_is_eligible_for_champion(trial_row))),
-                float(int(float(trial_row.keep_coverage_pct) >= MIN_KEEP_COVERAGE_PCT)),
-                float(int(float(trial_row.expectancy) > 0.0)),
-                float(int(trial_row.trade_count > 0 and trial_row.approval_count > 0)),
-                _finite_sort_metric(trial_row.weekly_return_pct),
-                _finite_sort_metric(trial_row.expectancy),
-                _finite_sort_metric(trial_row.keep_coverage_pct),
-                _finite_sort_metric(trial_row.approval_precision_top_half),
-                -_finite_sort_metric(trial_row.cost_buffer_reject_rate),
-                -_finite_sort_metric(trial_row.max_drawdown_pct),
-                -float(trial_row.rejected_by_low_edge_count),
-                -abs(float(approval_precision_threshold) - base_min_confidence),
-                -abs(float(abstain_margin) - base_abstain_margin),
-            )
-            if best_score is None or score > best_score:
-                best_score = score
-                best_overrides = overrides
-                best_row = trial_row
+    for cost_buffer_floor in cost_buffer_floor_candidates:
+        for approval_precision_threshold in approval_precision_threshold_candidates:
+            for abstain_margin in abstain_margin_candidates:
+                overrides = {
+                    "cost_buffer_floor": float(cost_buffer_floor),
+                    "abstain_margin": float(abstain_margin),
+                    "approval_precision_threshold": float(approval_precision_threshold),
+                }
+                trial_row, _trial_result = _run_real_lane(
+                    model_name="xgb",
+                    feat=feat,
+                    preds=xgb_preds,
+                    config=config,
+                    role="candidate",
+                    comparison_preds=support_preds,
+                    gate_overrides=overrides,
+                    notes="xgb primary lane gate calibration",
+                )
+                score = (
+                    float(int(_is_eligible_for_champion(trial_row))),
+                    float(int(float(trial_row.keep_coverage_pct) >= MIN_KEEP_COVERAGE_PCT)),
+                    float(int(float(trial_row.expectancy) > 0.0)),
+                    float(int(trial_row.trade_count > 0 and trial_row.approval_count > 0)),
+                    _finite_sort_metric(trial_row.keep_coverage_pct),
+                    _finite_sort_metric(trial_row.expectancy),
+                    _finite_sort_metric(trial_row.approval_precision_top_half),
+                    _finite_sort_metric(trial_row.weekly_return_pct),
+                    -_finite_sort_metric(trial_row.cost_buffer_reject_rate),
+                    -float(trial_row.rejected_by_low_edge_count),
+                    -float(trial_row.rejected_by_disagreement_count),
+                    -_finite_sort_metric(trial_row.max_drawdown_pct),
+                    -abs(float(cost_buffer_floor) - base_cost_buffer),
+                    -abs(float(approval_precision_threshold) - base_min_confidence),
+                    -abs(float(abstain_margin) - base_abstain_margin),
+                )
+                if best_score is None or score > best_score:
+                    best_score = score
+                    best_overrides = overrides
+                    best_row = trial_row
 
     if best_row is not None:
         print(
             "[COMPARE] tuned_gate "
+            f"cost_buffer_floor={best_overrides['cost_buffer_floor']:.6f} "
             f"approval_precision_threshold={best_overrides['approval_precision_threshold']:.6f} "
             f"abstain_margin={best_overrides['abstain_margin']:.6f} "
             f"weekly={best_row.weekly_return_pct}% sharpe={best_row.sharpe} trades={best_row.trade_count} "

@@ -591,6 +591,26 @@ def test_signal_gate_tracks_disagreement_and_low_edge_counts():
     assert int(gated.notna().sum()) == 1
 
 
+def test_signal_gate_thresholds_allow_cost_buffer_and_precision_overrides():
+    import scripts.compare_models as cm
+    from marketify.config import AppConfig
+
+    config = AppConfig()
+    fee_floor = (float(config.broker.fee_bps) + float(config.broker.slippage_bps)) / 10000.0
+
+    thresholds = cm._signal_gate_thresholds(
+        config,
+        gate_overrides={
+            "cost_buffer_floor": 0.0,
+            "approval_precision_threshold": 0.42,
+            "abstain_margin": 0.0,
+        },
+    )
+
+    assert abs(float(thresholds["edge_floor"]) - fee_floor) < 1e-12
+    assert float(thresholds["min_confidence"]) == 0.42
+
+
 def test_fusion_reference_only_is_not_champion_eligible():
     import scripts.compare_models as cm
 
