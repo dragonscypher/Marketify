@@ -689,6 +689,42 @@ def test_ordered_weak_feature_candidates_prioritizes_requested_features():
     assert ordered[:4] == ["news_risk", "news_sentiment_score", "is_afternoon", "is_morning"]
 
 
+def test_tune_real_path_gate_knobs_prioritizes_expectancy_then_coverage_then_trades(monkeypatch):
+    import scripts.compare_models as cm
+    from marketify.config import AppConfig
+
+    monkeypatch.setattr(
+        cm,
+        "_signal_gate_thresholds",
+        lambda config, gate_overrides=None: {
+            "min_confidence": 0.35,
+            "max_disagreement": 0.006,
+        },
+    )
+
+    def fake_run_real_lane(model_name, feat, preds, config, role, comparison_preds=None, gate_overrides=None, notes=""):
+        overrides = gate_overrides or {}
+        key = (round(float(overrides["max_disagreement"]), 6), round(float(overrides["approval_precision_threshold"]), 6))
+        row_map = {
+            (0.006, 0.30): _make_real_benchmark_row(expectancy=-0.5, keep_coverage_pct=20.0, trade_count=12, approval_count=12, weekly_return_pct=2.0),
+            (0.006, 0.35): _make_real_benchmark_row(expectancy=0.2, keep_coverage_pct=6.0, trade_count=0, approval_count=0, weekly_return_pct=3.0),
+            (0.006, 0.40): _make_real_benchmark_row(expectancy=0.1, keep_coverage_pct=7.0, trade_count=2, approval_count=2, weekly_return_pct=0.8),
+        }
+        row = row_map.get(key, _make_real_benchmark_row(expectancy=-1.0, keep_coverage_pct=1.0, trade_count=0, approval_count=0, weekly_return_pct=0.1))
+        return row, {}
+
+    monkeypatch.setattr(cm, "_run_real_lane", fake_run_real_lane)
+
+    best = cm._tune_real_path_gate_knobs(
+        feat=pd.DataFrame(),
+        xgb_preds=pd.Series(dtype=float),
+        config=AppConfig(),
+        support_preds={},
+    )
+
+    assert best == {"max_disagreement": 0.006, "approval_precision_threshold": 0.4}
+
+
 def test_fusion_reference_only_is_not_champion_eligible():
     import scripts.compare_models as cm
 
