@@ -15,6 +15,8 @@ Policy tuning rules:
 Outputs:
   reports/fusion_policy_tuning.csv
   reports/fusion_policy_tuning.md
+    reports/xgb_real_leaderboard.csv
+    reports/xgb_real_leaderboard.md
   reports/multimodal_leaderboard.csv
   reports/multimodal_leaderboard.md
   reports/multimodal_real_benchmark.md
@@ -28,6 +30,7 @@ import itertools
 import os
 import sys
 from copy import deepcopy
+from dataclasses import asdict
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -166,6 +169,9 @@ def _pick_best_model(rows: list[dict], metrics_key: str = "metrics") -> dict:
             float(m.get("weekly_return_pct", 0.0)),
             float(m.get("sharpe_ratio", 0.0)),
             -float(m.get("max_drawdown_pct", 0.0)),
+            -float(m.get("cvar_95_pct", 0.0)),
+            float(m.get("win_rate_pct", 0.0)),
+            float(m.get("expectancy", 0.0)),
             int(m.get("trade_count", 0)),
         )
 
@@ -412,7 +418,40 @@ def _write_fusion_policy_tuning(rows: list[dict], reports_dir: Path) -> None:
     (reports_dir / "fusion_policy_tuning.md").write_text("\n".join(md_lines), encoding="utf-8")
 
 
+def _write_xgb_real_leaderboard(xgb_rows: list[object], reports_dir: Path) -> None:
+    from scripts.compare_models import build_xgb_real_leaderboard_markdown
+
+    records = [asdict(row) for row in xgb_rows]
+    df = pd.DataFrame(records)
+    df.to_csv(reports_dir / "xgb_real_leaderboard.csv", index=False)
+
+    champion = next((row for row in xgb_rows if getattr(row, "role", "") == "champion"), xgb_rows[0])
+    md = build_xgb_real_leaderboard_markdown(df, champion)
+    (reports_dir / "xgb_real_leaderboard.md").write_text(md, encoding="utf-8")
+
+
+def _build_exact_blocker(current_metrics: dict, xgb_primary: object | None = None) -> str:
+    gap = round(float(current_metrics["target_weekly_pct"]) - float(current_metrics["weekly_return_pct"]), 4)
+    parts = [f"gap_to_target={gap} pct_points"]
+
+    if float(current_metrics.get("expectancy", 0.0)) <= 0.0:
+        parts.append("expectancy_not_positive")
+    else:
+        parts.append("per_trade_edge_still_below_target_after_safe_gates")
+
+    if int(current_metrics.get("trade_count", 0)) <= 0:
+        parts.append("no_approved_trades")
+
+    if xgb_primary is not None:
+        xgb_weekly = float(getattr(xgb_primary, "weekly_return_pct", float("nan")))
+        if np.isfinite(xgb_weekly):
+            parts.append(f"xgb_primary_single_model={xgb_weekly}%")
+
+    return "; ".join(parts)
+
+
 def _write_next_status(
+    xgb_primary,
     baseline_fusion: dict,
     best_validation_policy: dict,
     final_tuned_fusion: dict,
@@ -425,11 +464,31 @@ def _write_next_status(
     w = winner["metrics"]
     delta = round(float(t["weekly_return_pct"]) - float(b["weekly_return_pct"]), 4)
     gap = round(float(t["target_weekly_pct"]) - float(t["weekly_return_pct"]), 4)
+    current_gap = round(float(w["target_weekly_pct"]) - float(w["weekly_return_pct"]), 4)
+    exact_blocker = _build_exact_blocker(w, xgb_primary)
 
     lines = [
         "# NEXT STATUS",
         "",
-        "Scope: fusion policy optimization only. No new models. No leverage increase.",
+        "Scope: xgb primary single-model lane + deterministic fusion decision layer. No new models. No leverage increase.",
+        "",
+        "## Current Champion",
+        f"- current champion: {winner['model']}",
+        f"- weekly return: {w['weekly_return_pct']}%",
+        f"- gap to 1.0% target: {current_gap} percentage points",
+        f"- sharpe: {w['sharpe_ratio']}",
+        f"- max drawdown: {w['max_drawdown_pct']}%",
+        f"- cvar_95: {w['cvar_95_pct']}%",
+        f"- trade count: {w['trade_count']}",
+        f"- result: {w['weekly_status']}",
+        f"- exact blocker: {exact_blocker}",
+        "",
+        "## Champion Path",
+        f"- xgb_primary_single_model_weekly_return_pct: {getattr(xgb_primary, 'weekly_return_pct', '')}",
+        f"- xgb_primary_single_model_sharpe: {getattr(xgb_primary, 'sharpe', '')}",
+        f"- xgb_primary_single_model_max_drawdown_pct: {getattr(xgb_primary, 'max_drawdown_pct', '')}",
+        f"- xgb_primary_single_model_trade_count: {getattr(xgb_primary, 'trade_count', '')}",
+        "- recurrent_lane_role: support_context_only",
         "",
         "## Baseline Fusion (real benchmark path)",
         f"- weekly_return_pct: {b['weekly_return_pct']}",
@@ -510,6 +569,7 @@ def _write_trades_and_equity(best_model: str, all_rows: list[dict], reports_dir:
 def main() -> int:
     from marketify.backtest.simulator import run_walk_forward_backtest
     from marketify.config import AppConfig
+    from scripts.compare_models import _frozen_comparison_row, _run_real_lane
 
     _ensure_dir(REPORTS)
     config = AppConfig()
@@ -553,6 +613,30 @@ def main() -> int:
     if shared_feat is None or xgb_preds is None or gru_preds is None:
         print("ERROR: missing cached predictions for fusion tuning.")
         return 1
+
+    xgb_real_rows: list[object] = []
+    xgb_primary, _xgb_real_result = _run_real_lane(
+        model_name="xgb",
+        feat=shared_feat,
+        preds=xgb_preds,
+        config=config,
+        role="champion",
+        comparison_preds={"gru": gru_preds},
+        notes="primary single-model lane",
+    )
+    xgb_real_rows.append(xgb_primary)
+    gru_support, _gru_real_result = _run_real_lane(
+        model_name="gru",
+        feat=shared_feat,
+        preds=gru_preds,
+        config=config,
+        role="comparison",
+        comparison_preds={"xgb": xgb_preds},
+        notes="support/context only; not primary",
+    )
+    xgb_real_rows.append(gru_support)
+    xgb_real_rows.append(_frozen_comparison_row("lstm", "support/context only; frozen off primary path"))
+    _write_xgb_real_leaderboard(xgb_real_rows, REPORTS)
 
     baseline_fusion = _run_cached_fusion_backtest(
         feat=shared_feat,
@@ -617,12 +701,14 @@ def main() -> int:
     _write_leaderboard(final_rows, REPORTS)
     _write_real_benchmark_md(best, final_rows, REPORTS)
     _write_trades_and_equity(best["model"], final_rows, REPORTS)
-    _write_next_status(baseline_fusion, best_validation_policy, final_tuned_fusion, best, REPORTS)
+    _write_next_status(xgb_primary, baseline_fusion, best_validation_policy, final_tuned_fusion, best, REPORTS)
 
     print(f"\nReports written to {REPORTS}/")
     for fname in [
         "fusion_policy_tuning.csv",
         "fusion_policy_tuning.md",
+        "xgb_real_leaderboard.csv",
+        "xgb_real_leaderboard.md",
         "multimodal_leaderboard.csv",
         "multimodal_leaderboard.md",
         "multimodal_real_benchmark.md",

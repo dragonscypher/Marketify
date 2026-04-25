@@ -13,6 +13,8 @@ import numpy as np
 import pandas as pd
 import pytest
 
+from scripts.compare_models import RealBenchmarkRow
+
 # ---------------------------------------------------------------------------
 # news_data — neutral fallback
 # ---------------------------------------------------------------------------
@@ -337,6 +339,89 @@ class TestMultimodalBenchmarkReports:
         best = mb._pick_best_model(rows)
         assert best["model"] == "fusion"
 
+    def test_pick_best_model_uses_cvar_and_trade_quality_tiebreakers(self):
+        import scripts.run_multimodal_benchmark as mb
+
+        rows = [
+            {
+                "model": "xgb",
+                "metrics": {
+                    "weekly_return_pct": 0.9,
+                    "sharpe_ratio": 0.5,
+                    "max_drawdown_pct": 0.3,
+                    "cvar_95_pct": 0.2,
+                    "win_rate_pct": 51.0,
+                    "expectancy": 0.5,
+                    "trade_count": 12,
+                },
+            },
+            {
+                "model": "fusion",
+                "metrics": {
+                    "weekly_return_pct": 0.9,
+                    "sharpe_ratio": 0.5,
+                    "max_drawdown_pct": 0.3,
+                    "cvar_95_pct": 0.1,
+                    "win_rate_pct": 55.0,
+                    "expectancy": 0.7,
+                    "trade_count": 12,
+                },
+            },
+        ]
+
+        best = mb._pick_best_model(rows)
+        assert best["model"] == "fusion"
+
+    def test_xgb_real_leaderboard_files_written(self, tmp_path):
+        import scripts.run_multimodal_benchmark as mb
+
+        xgb_rows = [
+            RealBenchmarkRow(
+                model_name="xgb",
+                role="champion",
+                weekly_return_pct=0.6977,
+                sharpe=1.2268,
+                max_drawdown_pct=0.1933,
+                cvar_95_pct=0.0556,
+                trade_count=10,
+                win_rate_pct=60.0,
+                expectancy=1.0,
+                weekly_target_pass=False,
+                comparison_only=False,
+                run_status="COMPLETE",
+                gate_block_count=12,
+                gate_keep_ratio_pct=44.0,
+                top_blocker="below_cost_buffer",
+                notes="primary single-model lane",
+            ),
+            RealBenchmarkRow(
+                model_name="gru",
+                role="comparison",
+                weekly_return_pct=0.5000,
+                sharpe=0.8000,
+                max_drawdown_pct=0.3000,
+                cvar_95_pct=0.0800,
+                trade_count=8,
+                win_rate_pct=51.0,
+                expectancy=0.5,
+                weekly_target_pass=False,
+                comparison_only=True,
+                run_status="COMPLETE",
+                gate_block_count=20,
+                gate_keep_ratio_pct=20.0,
+                top_blocker="model_disagreement",
+                notes="support/context only; not primary",
+            ),
+        ]
+
+        mb._write_xgb_real_leaderboard(xgb_rows, tmp_path)
+
+        assert (tmp_path / "xgb_real_leaderboard.csv").exists()
+        assert (tmp_path / "xgb_real_leaderboard.md").exists()
+        content = (tmp_path / "xgb_real_leaderboard.md").read_text(encoding="utf-8")
+        assert "current_champion: xgb" in content
+        assert "GRU/LSTM comparison only. Not eligible as champion here." in content
+
     def test_policy_grid_only_tunes_allowed_knobs(self):
         import scripts.run_multimodal_benchmark as mb
 
@@ -419,15 +504,37 @@ class TestMultimodalBenchmarkReports:
             },
         }
         winner = tuned
+        xgb_primary = RealBenchmarkRow(
+            model_name="xgb",
+            role="champion",
+            weekly_return_pct=0.6977,
+            sharpe=1.2268,
+            max_drawdown_pct=0.1933,
+            cvar_95_pct=0.0556,
+            trade_count=10,
+            win_rate_pct=60.0,
+            expectancy=1.0,
+            weekly_target_pass=False,
+            comparison_only=False,
+            run_status="COMPLETE",
+            gate_block_count=12,
+            gate_keep_ratio_pct=44.0,
+            top_blocker="below_cost_buffer",
+            notes="primary single-model lane",
+        )
 
         mb._write_fusion_policy_tuning(tuning_rows, tmp_path)
-        mb._write_next_status(baseline, tuning_rows[0], tuned, winner, tmp_path)
+        mb._write_next_status(xgb_primary, baseline, tuning_rows[0], tuned, winner, tmp_path)
 
         assert (tmp_path / "fusion_policy_tuning.csv").exists()
         assert (tmp_path / "fusion_policy_tuning.md").exists()
         assert (tmp_path / "NEXT_STATUS.md").exists()
         assert "fusion_abstain_margin" in (tmp_path / "fusion_policy_tuning.md").read_text(encoding="utf-8")
-        assert "abstain_margin" in (tmp_path / "NEXT_STATUS.md").read_text(encoding="utf-8")
+        next_status = (tmp_path / "NEXT_STATUS.md").read_text(encoding="utf-8")
+        assert "abstain_margin" in next_status
+        assert "current champion: fusion" in next_status
+        assert "cvar_95" in next_status
+        assert "exact blocker" in next_status
 
 
 # ---------------------------------------------------------------------------
