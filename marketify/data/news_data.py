@@ -13,29 +13,62 @@ class NewsItem:
     sentiment_hint: float = 0.0
 
 
+# Neutral result returned when no feed is available.
+NEUTRAL_SUMMARY: dict[str, Any] = {
+    "news_risk": 0.0,
+    "sentiment_score": 0.0,
+    "headline_count": 0,
+    "summary": "No API key/news feed configured; using neutral news risk.",
+}
+
+
 class NewsProvider:
-    """Provider stub for future Alpha Vantage/Finnhub integrations."""
+    """Provider stub for future Alpha Vantage/Finnhub integrations.
+
+    All methods return neutral/empty results when no API key is present.
+    Never raises on missing keys — safe to use in paper-trading pipeline.
+    """
 
     def __init__(self, alpha_vantage_key: str | None = None, finnhub_key: str | None = None):
         self.alpha_vantage_key = alpha_vantage_key or os.getenv("ALPHA_VANTAGE_API_KEY")
         self.finnhub_key = finnhub_key or os.getenv("FINNHUB_API_KEY")
 
-    def fetch(self, symbol: str) -> list[NewsItem]:
+    def fetch(self, symbol: str) -> list[NewsItem]:  # noqa: ARG002
+        """Fetch recent news items for *symbol*.
+
+        Returns empty list when no API key configured.
+        A future implementation would call Alpha Vantage / Finnhub here.
+        """
         if not self.alpha_vantage_key and not self.finnhub_key:
             return []
+        # Placeholder: real integration would populate items here.
         return []
 
-    def summarize_risk(self, symbol: str) -> dict[str, Any]:
-        items = self.fetch(symbol)
+    def compute_aggregate_sentiment(self, items: list[NewsItem]) -> float:
+        """Average sentiment_hint across all items. Returns 0.0 for empty list."""
         if not items:
-            return {
-                "news_risk": 0.0,
-                "headline_count": 0,
-                "summary": "No API key/news feed configured; using neutral news risk.",
-            }
+            return 0.0
+        total = sum(item.sentiment_hint for item in items)
+        return float(total / len(items))
+
+    def summarize_risk(self, symbol: str) -> dict[str, Any]:
+        """Return news-risk summary dict.
+
+        news_risk is 0.0 when no feed; never > 1.0.
+        """
+        try:
+            items = self.fetch(symbol)
+        except Exception:  # pylint: disable=broad-except
+            return dict(NEUTRAL_SUMMARY)
+
+        if not items:
+            return dict(NEUTRAL_SUMMARY)
+
         risk = min(1.0, 0.2 + len(items) * 0.05)
+        sentiment = self.compute_aggregate_sentiment(items)
         return {
             "news_risk": risk,
+            "sentiment_score": sentiment,
             "headline_count": len(items),
             "summary": f"News feed active with {len(items)} recent headlines.",
         }

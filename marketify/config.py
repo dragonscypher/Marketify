@@ -27,6 +27,10 @@ class ModelConfig:
     subsample: float = 0.9
     colsample_bytree: float = 0.9
     random_state: int = 42
+    # RNN / GRU params (used by rnn_model.py)
+    rnn_seq_len: int = 20
+    rnn_hidden: int = 32
+    rnn_epochs: int = 10
 
 
 @dataclass

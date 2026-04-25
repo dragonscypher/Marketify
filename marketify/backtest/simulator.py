@@ -14,8 +14,14 @@ from marketify.features.technical import (TECHNICAL_FEATURE_COLUMNS,
                                           add_technical_features)
 from marketify.models.ensemble import (TradeIdeaInput, build_trade_idea,
                                        compute_cvar_95)
-from marketify.models.ridge_model import rolling_train_predict as rolling_train_predict_ridge
-from marketify.models.xgb_model import rolling_train_predict as rolling_train_predict_xgb
+from marketify.models.fusion_model import \
+    rolling_train_predict as rolling_train_predict_fusion
+from marketify.models.ridge_model import \
+    rolling_train_predict as rolling_train_predict_ridge
+from marketify.models.rnn_model import \
+    rolling_train_predict as rolling_train_predict_gru
+from marketify.models.xgb_model import \
+    rolling_train_predict as rolling_train_predict_xgb
 from marketify.risk.risk_engine import RiskEngine
 
 
@@ -83,6 +89,24 @@ def _compute_predictions(feat: pd.DataFrame, config: AppConfig) -> tuple[pd.Seri
     model_name = str(getattr(config.broker, "backtest_model", "xgb")).lower()
     if model_name == "ridge":
         preds = rolling_train_predict_ridge(
+            frame=feat,
+            feature_cols=TECHNICAL_FEATURE_COLUMNS,
+            target_col="target_next_ret",
+            config=config.model,
+        )
+        return preds, model_name
+
+    if model_name == "gru":
+        preds = rolling_train_predict_gru(
+            frame=feat,
+            feature_cols=TECHNICAL_FEATURE_COLUMNS,
+            target_col="target_next_ret",
+            config=config.model,
+        )
+        return preds, model_name
+
+    if model_name == "fusion":
+        preds = rolling_train_predict_fusion(
             frame=feat,
             feature_cols=TECHNICAL_FEATURE_COLUMNS,
             target_col="target_next_ret",

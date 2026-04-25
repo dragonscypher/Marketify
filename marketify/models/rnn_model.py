@@ -451,3 +451,96 @@ def fit_predict_recurrent_split(
     )
     preds = model.predict(x_pred)
     return pd.Series(preds, index=pred_ts, name=f"pred_{architecture}")
+
+
+# ---------------------------------------------------------------------------
+# Rolling-window predictor — same interface as xgb_model / ridge_model
+# ---------------------------------------------------------------------------
+
+def rolling_train_predict(
+    frame: pd.DataFrame,
+    feature_cols: list[str],
+    target_col: str,
+    config: "ModelConfig",  # marketify.config.ModelConfig
+) -> pd.Series:
+    """Walk-forward GRU prediction with same interface as XGB / Ridge.
+
+    Converts ``ModelConfig`` RNN fields into a ``RecurrentModelConfig`` and
+    drives rolling retraining using ``build_sequence_dataset``.
+
+    Falls back to zeros-series when PyTorch is not installed.
+    """
+    from marketify.config import \
+        ModelConfig  # local import avoids circular at module level
+
+    if not isinstance(config, ModelConfig):
+        raise TypeError(f"Expected ModelConfig, got {type(config)}")
+
+    seq_len = getattr(config, "rnn_seq_len", 20)
+    hidden = getattr(config, "rnn_hidden", 32)
+    epochs = getattr(config, "rnn_epochs", 10)
+
+    rnn_cfg = RecurrentModelConfig(
+        architecture="gru",
+        sequence_length=seq_len,
+        hidden_size=hidden,
+        num_layers=1,
+        dropout=0.0,
+        epochs=epochs,
+        learning_rate=1e-3,
+        random_state=config.random_state,
+    )
+
+    min_rows = config.train_window + seq_len + 10
+    if len(frame) <= min_rows:
+        raise ValueError(
+            f"Not enough rows for GRU rolling training. "
+            f"Need > {min_rows}, got {len(frame)}."
+        )
+
+    preds = np.full(len(frame), np.nan, dtype=float)
+    idx_map = {ts: i for i, ts in enumerate(frame.index)}
+
+    start = config.train_window
+    while start < len(frame):
+        train_slice = frame.iloc[max(0, start - config.train_window) : start]
+        end_pred = min(len(frame), start + config.retrain_every)
+        pred_slice = frame.iloc[start:end_pred]
+
+        try:
+            x_train, y_train, _ = build_sequence_dataset(
+                train_slice, feature_cols, target_col, seq_len
+            )
+        except Exception:
+            start = end_pred
+            continue
+
+        if x_train.size == 0:
+            start = end_pred
+            continue
+
+        model = GRUBaseline(rnn_cfg)
+        try:
+            model.fit(x_train, y_train)
+        except Exception:
+            start = end_pred
+            continue
+
+        x_pred, _, pred_ts = build_sequence_dataset(
+            # Pass larger window for sequences that straddle the boundary
+            pd.concat([train_slice.iloc[-seq_len:], pred_slice]),
+            feature_cols,
+            target_col,
+            seq_len,
+            selected_index=pred_slice.index,
+        )
+        if x_pred.size > 0:
+            pred_vals = model.predict(x_pred)
+            for ts, val in zip(pred_ts, pred_vals):
+                i = idx_map.get(ts)
+                if i is not None:
+                    preds[i] = float(val)
+
+        start = end_pred
+
+    return pd.Series(preds, index=frame.index, name="pred_next_ret")
