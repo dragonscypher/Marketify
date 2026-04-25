@@ -74,6 +74,10 @@ class RealBenchmarkRow:
     kept_trade_count: int = 0
     average_edge_kept: float = 0.0
     average_edge_rejected: float = 0.0
+    cost_buffer_reject_rate: float = 0.0
+    approval_precision_top_half: float = 0.0
+    approval_precision_bottom_half: float = 0.0
+    expectancy_by_confidence_bucket: str = "unavailable"
     champion_eligible: bool = False
 
 
@@ -234,6 +238,8 @@ def _is_eligible_for_champion(row: RealBenchmarkRow) -> bool:
         return False
     if row.comparison_only:
         return False
+    if float(row.weekly_return_pct) < 1.0:
+        return False
     if int(row.trade_count) <= 0:
         return False
     if int(row.approval_count) <= 0:
@@ -291,7 +297,12 @@ def _signal_gate_thresholds(config, gate_overrides: dict[str, float] | None = No
         )
     )
     return {
-        "min_confidence": max(float(getattr(config.broker, "fusion_min_confidence", 0.30)), 0.35),
+        "min_confidence": float(
+            gate_overrides.get(
+                "approval_precision_threshold",
+                max(float(getattr(config.broker, "fusion_min_confidence", 0.30)), 0.35),
+            )
+        ),
         "abstain_margin": abstain_margin,
         "edge_floor": cost_buffer + abstain_margin,
         "news_cutoff": min(
@@ -396,6 +407,8 @@ def _apply_signal_gate(
         "kept_trade_count": kept,
         "average_edge_kept": round(float(np.mean(edge_kept)), 6) if edge_kept else 0.0,
         "average_edge_rejected": round(float(np.mean(edge_rejected)), 6) if edge_rejected else 0.0,
+        "cost_buffer_reject_rate": round((rejected_by_low_edge_count / scored) * 100.0, 2) if scored else 0.0,
+        "selected_approval_precision_threshold": float(thresholds["min_confidence"]),
         "selected_max_disagreement": float(thresholds["max_disagreement"]),
         "selected_abstain_margin": float(thresholds["abstain_margin"]),
     }
@@ -444,7 +457,9 @@ def _run_real_lane(
         gate_overrides=gate_overrides,
     )
     result = run_backtest_from_predictions(feat, gated_preds, lane_config, model_used=model_name)
-    metrics = _compute_real_metrics(result["equity"], result["trade_diagnostics"])
+    trade_diag = result["trade_diagnostics"]
+    metrics = _compute_real_metrics(result["equity"], trade_diag)
+    precision_diag = _approval_precision_diagnostics(trade_diag)
     keep_coverage_pct = float(metrics["keep_coverage_pct"])
     row = RealBenchmarkRow(
         model_name=model_name,
@@ -471,6 +486,10 @@ def _run_real_lane(
         kept_trade_count=int(cast(int, gate_stats["kept_trade_count"])),
         average_edge_kept=float(cast(float, gate_stats["average_edge_kept"])),
         average_edge_rejected=float(cast(float, gate_stats["average_edge_rejected"])),
+        cost_buffer_reject_rate=float(cast(float, gate_stats["cost_buffer_reject_rate"])),
+        approval_precision_top_half=float(precision_diag["approval_precision_top_half"]),
+        approval_precision_bottom_half=float(precision_diag["approval_precision_bottom_half"]),
+        expectancy_by_confidence_bucket=str(precision_diag["expectancy_by_confidence_bucket"]),
         champion_eligible=False,
     )
     row.champion_eligible = _is_eligible_for_champion(row)
@@ -526,6 +545,10 @@ def _failed_model_row(model_name: str, notes: str) -> RealBenchmarkRow:
         kept_trade_count=0,
         average_edge_kept=0.0,
         average_edge_rejected=0.0,
+        cost_buffer_reject_rate=0.0,
+        approval_precision_top_half=0.0,
+        approval_precision_bottom_half=0.0,
+        expectancy_by_confidence_bucket="unavailable",
         champion_eligible=False,
     )
 
@@ -634,16 +657,9 @@ def _tune_real_path_gate_knobs(
     support_preds: dict[str, pd.Series],
 ) -> dict[str, float]:
     base_thresholds = _signal_gate_thresholds(config)
-    base_disagreement = float(base_thresholds["max_disagreement"])
     base_abstain_margin = float(base_thresholds["abstain_margin"])
+    base_min_confidence = float(base_thresholds["min_confidence"])
 
-    disagreement_candidates = sorted(
-        {
-            round(base_disagreement, 6),
-            round(base_disagreement * 1.25, 6),
-            round(base_disagreement * 1.50, 6),
-        }
-    )
     abstain_margin_candidates = sorted(
         {
             round(max(base_abstain_margin - 0.00005, 0.0), 6),
@@ -651,19 +667,26 @@ def _tune_real_path_gate_knobs(
             round(base_abstain_margin + 0.00005, 6),
         }
     )
+    approval_precision_threshold_candidates = sorted(
+        {
+            round(max(base_min_confidence - 0.05, 0.30), 6),
+            round(base_min_confidence, 6),
+            round(min(base_min_confidence + 0.05, 0.80), 6),
+        }
+    )
 
     best_overrides = {
-        "max_disagreement": base_disagreement,
         "abstain_margin": base_abstain_margin,
+        "approval_precision_threshold": base_min_confidence,
     }
     best_score: tuple[float, ...] | None = None
     best_row: RealBenchmarkRow | None = None
 
-    for max_disagreement in disagreement_candidates:
+    for approval_precision_threshold in approval_precision_threshold_candidates:
         for abstain_margin in abstain_margin_candidates:
             overrides = {
-                "max_disagreement": float(max_disagreement),
                 "abstain_margin": float(abstain_margin),
+                "approval_precision_threshold": float(approval_precision_threshold),
             }
             trial_row, _trial_result = _run_real_lane(
                 model_name="xgb",
@@ -676,14 +699,18 @@ def _tune_real_path_gate_knobs(
                 notes="xgb primary lane gate calibration",
             )
             score = (
+                float(int(_is_eligible_for_champion(trial_row))),
+                float(int(float(trial_row.keep_coverage_pct) >= MIN_KEEP_COVERAGE_PCT)),
+                float(int(float(trial_row.expectancy) > 0.0)),
                 float(int(trial_row.trade_count > 0 and trial_row.approval_count > 0)),
                 _finite_sort_metric(trial_row.weekly_return_pct),
                 _finite_sort_metric(trial_row.expectancy),
                 _finite_sort_metric(trial_row.keep_coverage_pct),
+                _finite_sort_metric(trial_row.approval_precision_top_half),
+                -_finite_sort_metric(trial_row.cost_buffer_reject_rate),
                 -_finite_sort_metric(trial_row.max_drawdown_pct),
-                -float(trial_row.rejected_by_disagreement_count),
                 -float(trial_row.rejected_by_low_edge_count),
-                -abs(float(max_disagreement) - base_disagreement),
+                -abs(float(approval_precision_threshold) - base_min_confidence),
                 -abs(float(abstain_margin) - base_abstain_margin),
             )
             if best_score is None or score > best_score:
@@ -694,11 +721,11 @@ def _tune_real_path_gate_knobs(
     if best_row is not None:
         print(
             "[COMPARE] tuned_gate "
-            f"max_disagreement={best_overrides['max_disagreement']:.6f} "
+            f"approval_precision_threshold={best_overrides['approval_precision_threshold']:.6f} "
             f"abstain_margin={best_overrides['abstain_margin']:.6f} "
             f"weekly={best_row.weekly_return_pct}% sharpe={best_row.sharpe} trades={best_row.trade_count} "
             f"keep={best_row.keep_coverage_pct}% disagreement_rejects={best_row.rejected_by_disagreement_count} "
-            f"low_edge_rejects={best_row.rejected_by_low_edge_count}"
+            f"low_edge_rejects={best_row.rejected_by_low_edge_count} top_half_precision={best_row.approval_precision_top_half}"
         )
 
     return best_overrides
@@ -820,6 +847,10 @@ def _build_benchmark_summary(champion_row: RealBenchmarkRow | None, display_row:
         "rejected_by_disagreement_count": display_row.rejected_by_disagreement_count,
         "rejected_by_low_edge_count": display_row.rejected_by_low_edge_count,
         "kept_trade_count": display_row.kept_trade_count,
+        "cost_buffer_reject_rate": display_row.cost_buffer_reject_rate,
+        "approval_precision_top_half": display_row.approval_precision_top_half,
+        "approval_precision_bottom_half": display_row.approval_precision_bottom_half,
+        "expectancy_by_confidence_bucket": display_row.expectancy_by_confidence_bucket,
         "average_edge_kept": display_row.average_edge_kept,
         "average_edge_rejected": display_row.average_edge_rejected,
         "expectancy": display_row.expectancy,
@@ -842,11 +873,12 @@ def build_model_leaderboard_markdown(
         f"current_champion: {current_champion}",
         "",
         "| model_name | role | weekly_return_pct | sharpe | max_drawdown_pct | trade_count | keep_coverage_pct | rejected_by_disagreement_count | rejected_by_low_edge_count | kept_trade_count | average_edge_kept | average_edge_rejected | PASS/FAIL | exact_blocker | notes |",
-        "| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- | --- | --- |",
+        "| model_name | role | weekly_return_pct | sharpe | max_drawdown_pct | trade_count | keep_coverage_pct | rejected_by_disagreement_count | rejected_by_low_edge_count | kept_trade_count | cost_buffer_reject_rate | approval_precision_top_half | approval_precision_bottom_half | expectancy_by_confidence_bucket | average_edge_kept | average_edge_rejected | PASS/FAIL | exact_blocker | notes |",
+        "| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- | ---: | ---: | --- | --- | --- |",
     ]
     for record in _build_model_compare_records(rows):
         lines.append(
-            f"| {record['model_name']} | {record['role']} | {_fmt_metric(record['weekly_return_pct'])} | {_fmt_metric(record['sharpe'])} | {_fmt_metric(record['max_drawdown_pct'])} | {record['trade_count']} | {_fmt_metric(record['keep_coverage_pct'], digits=2)} | {record['rejected_by_disagreement_count']} | {record['rejected_by_low_edge_count']} | {record['kept_trade_count']} | {_fmt_metric(record['average_edge_kept'], digits=6)} | {_fmt_metric(record['average_edge_rejected'], digits=6)} | {record['PASS_FAIL']} | {record['exact_blocker']} | {record['notes']} |"
+            f"| {record['model_name']} | {record['role']} | {_fmt_metric(record['weekly_return_pct'])} | {_fmt_metric(record['sharpe'])} | {_fmt_metric(record['max_drawdown_pct'])} | {record['trade_count']} | {_fmt_metric(record['keep_coverage_pct'], digits=2)} | {record['rejected_by_disagreement_count']} | {record['rejected_by_low_edge_count']} | {record['kept_trade_count']} | {_fmt_metric(record['cost_buffer_reject_rate'], digits=2)} | {_fmt_metric(record['approval_precision_top_half'], digits=2)} | {_fmt_metric(record['approval_precision_bottom_half'], digits=2)} | {record['expectancy_by_confidence_bucket']} | {_fmt_metric(record['average_edge_kept'], digits=6)} | {_fmt_metric(record['average_edge_rejected'], digits=6)} | {record['PASS_FAIL']} | {record['exact_blocker']} | {record['notes']} |"
         )
     lines += [
         "",
@@ -879,6 +911,10 @@ def build_real_benchmark_markdown(
         f"rejected_by_disagreement_count: {summary['rejected_by_disagreement_count']}",
         f"rejected_by_low_edge_count: {summary['rejected_by_low_edge_count']}",
         f"kept_trade_count: {summary['kept_trade_count']}",
+        f"cost_buffer_reject_rate: {_fmt_metric(summary['cost_buffer_reject_rate'], digits=2)}",
+        f"approval_precision_top_half: {_fmt_metric(summary['approval_precision_top_half'], digits=2)}",
+        f"approval_precision_bottom_half: {_fmt_metric(summary['approval_precision_bottom_half'], digits=2)}",
+        f"expectancy_by_confidence_bucket: {summary['expectancy_by_confidence_bucket']}",
         f"average_edge_kept: {_fmt_metric(summary['average_edge_kept'], digits=6)}",
         f"average_edge_rejected: {_fmt_metric(summary['average_edge_rejected'], digits=6)}",
         f"expectancy: {_fmt_metric(summary['expectancy'], digits=6)}",
@@ -888,14 +924,14 @@ def build_real_benchmark_markdown(
         f"exact_blocker: {summary['exact_blocker']}",
         "",
         "## Model Compare",
-        "| model_name | daily_return_pct | weekly_return_pct | baseline_weekly_pct | sharpe | max_drawdown_pct | cvar_95_pct | trade_count | approval_count | keep_coverage_pct | rejected_by_disagreement_count | rejected_by_low_edge_count | kept_trade_count | average_edge_kept | average_edge_rejected | expectancy | eligibility | PASS/FAIL | run_status | top_blocker | notes |",
-        "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|---|---|---|---|",
+        "| model_name | daily_return_pct | weekly_return_pct | baseline_weekly_pct | sharpe | max_drawdown_pct | cvar_95_pct | trade_count | approval_count | keep_coverage_pct | rejected_by_disagreement_count | rejected_by_low_edge_count | kept_trade_count | cost_buffer_reject_rate | approval_precision_top_half | approval_precision_bottom_half | expectancy_by_confidence_bucket | average_edge_kept | average_edge_rejected | expectancy | eligibility | PASS/FAIL | run_status | top_blocker | notes |",
+        "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|---:|---:|---:|---|---|---|---|---|",
     ]
     for record in _build_model_compare_records(rows):
         lines.append(
             f"| {record['model_name']} | {_fmt_metric(record['daily_return_pct'])} | {_fmt_metric(record['weekly_return_pct'])} | {_fmt_metric(record['baseline_weekly_pct'])} | "
             f"{_fmt_metric(record['sharpe'])} | {_fmt_metric(record['max_drawdown_pct'])} | {_fmt_metric(record['cvar_95_pct'])} | {record['trade_count']} | {record['approval_count']} | "
-            f"{_fmt_metric(record['keep_coverage_pct'], digits=2)} | {record['rejected_by_disagreement_count']} | {record['rejected_by_low_edge_count']} | {record['kept_trade_count']} | {_fmt_metric(record['average_edge_kept'], digits=6)} | {_fmt_metric(record['average_edge_rejected'], digits=6)} | {_fmt_metric(record['expectancy'], digits=6)} | "
+            f"{_fmt_metric(record['keep_coverage_pct'], digits=2)} | {record['rejected_by_disagreement_count']} | {record['rejected_by_low_edge_count']} | {record['kept_trade_count']} | {_fmt_metric(record['cost_buffer_reject_rate'], digits=2)} | {_fmt_metric(record['approval_precision_top_half'], digits=2)} | {_fmt_metric(record['approval_precision_bottom_half'], digits=2)} | {record['expectancy_by_confidence_bucket']} | {_fmt_metric(record['average_edge_kept'], digits=6)} | {_fmt_metric(record['average_edge_rejected'], digits=6)} | {_fmt_metric(record['expectancy'], digits=6)} | "
             f"{record['eligibility']} | {record['PASS_FAIL']} | {record['run_status']} | {record['top_blocker']} | {record['notes']} |"
         )
     lines += [
@@ -932,6 +968,10 @@ def build_next_status_markdown(
         f"- rejected_by_disagreement_count: {summary['rejected_by_disagreement_count']}",
         f"- rejected_by_low_edge_count: {summary['rejected_by_low_edge_count']}",
         f"- kept_trade_count: {summary['kept_trade_count']}",
+        f"- cost_buffer_reject_rate: {_fmt_metric(summary['cost_buffer_reject_rate'], digits=2)}",
+        f"- approval_precision_top_half: {_fmt_metric(summary['approval_precision_top_half'], digits=2)}",
+        f"- approval_precision_bottom_half: {_fmt_metric(summary['approval_precision_bottom_half'], digits=2)}",
+        f"- expectancy_by_confidence_bucket: {summary['expectancy_by_confidence_bucket']}",
         f"- average_edge_kept: {_fmt_metric(summary['average_edge_kept'], digits=6)}",
         f"- average_edge_rejected: {_fmt_metric(summary['average_edge_rejected'], digits=6)}",
         f"- expectancy: {_fmt_metric(summary['expectancy'], digits=6)}",
@@ -986,6 +1026,54 @@ def _bucket_summary(diag: pd.DataFrame, column: str, group_name: str, bucket_cou
             }
         )
     return rows
+
+
+def _approval_precision_diagnostics(trade_diag: pd.DataFrame) -> dict[str, float | str]:
+    if trade_diag.empty or "pnl" not in trade_diag.columns or "signal_confidence" not in trade_diag.columns:
+        return {
+            "approval_precision_top_half": 0.0,
+            "approval_precision_bottom_half": 0.0,
+            "expectancy_by_confidence_bucket": "unavailable",
+        }
+
+    work = trade_diag[["pnl", "signal_confidence"]].copy()
+    work["pnl"] = pd.to_numeric(work["pnl"], errors="coerce")
+    work["signal_confidence"] = pd.to_numeric(work["signal_confidence"], errors="coerce")
+    work = work.dropna()
+    if work.empty:
+        return {
+            "approval_precision_top_half": 0.0,
+            "approval_precision_bottom_half": 0.0,
+            "expectancy_by_confidence_bucket": "unavailable",
+        }
+
+    ranked = work.sort_values("signal_confidence").reset_index(drop=True)
+    half_size = max(len(ranked) // 2, 1)
+    bottom_half = ranked.iloc[:half_size]
+    top_half = ranked.iloc[-half_size:]
+
+    bucket_count = min(3, int(ranked["signal_confidence"].nunique()))
+    bucket_summary = _bucket_summary(ranked, "signal_confidence", "confidence", bucket_count=bucket_count)
+    if bucket_summary:
+        label_map = {1: "low", 2: "mid", 3: "high"}
+        parts = []
+        for idx, bucket in enumerate(bucket_summary, start=1):
+            label = label_map.get(idx, f"bucket_{idx}")
+            parts.append(f"{label}={bucket['expectancy']} ({bucket['trade_count']})")
+        expectancy_by_confidence_bucket = "; ".join(parts)
+    else:
+        expectancy_by_confidence_bucket = "unavailable"
+
+    def _precision_pct(frame: pd.DataFrame) -> float:
+        if frame.empty:
+            return 0.0
+        return round(float((frame["pnl"] > 0).mean()) * 100.0, 2)
+
+    return {
+        "approval_precision_top_half": _precision_pct(top_half),
+        "approval_precision_bottom_half": _precision_pct(bottom_half),
+        "expectancy_by_confidence_bucket": expectancy_by_confidence_bucket,
+    }
 
 
 def _rolling_xgb_feature_importance(

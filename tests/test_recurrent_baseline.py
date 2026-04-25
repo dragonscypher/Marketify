@@ -441,6 +441,10 @@ def test_next_status_reports_exact_fail_gap_for_xgb_real_path():
         daily_return_pct=0.1395,
         approval_count=10,
         keep_coverage_pct=7.2,
+        cost_buffer_reject_rate=40.0,
+        approval_precision_top_half=80.0,
+        approval_precision_bottom_half=20.0,
+        expectancy_by_confidence_bucket="low=-2.0 (3); mid=-0.5 (3); high=1.5 (4)",
     )
 
     md = cm.build_next_status_markdown(champion)
@@ -452,6 +456,10 @@ def test_next_status_reports_exact_fail_gap_for_xgb_real_path():
     assert "rejected_by_disagreement_count: 0" in md
     assert "rejected_by_low_edge_count: 0" in md
     assert "kept_trade_count: 0" in md
+    assert "cost_buffer_reject_rate: 40.00" in md
+    assert "approval_precision_top_half: 80.00" in md
+    assert "approval_precision_bottom_half: 20.00" in md
+    assert "expectancy_by_confidence_bucket: low=-2.0 (3); mid=-0.5 (3); high=1.5 (4)" in md
     assert "gap to 1.0% target: 0.3023 percentage points" in md
     assert "result: FAIL" in md
     assert "dominant_gate=below_cost_buffer" in md
@@ -480,6 +488,10 @@ def _make_real_benchmark_row(model_name: str = "xgb", **overrides):
         daily_return_pct=0.1395,
         approval_count=10,
         keep_coverage_pct=7.2,
+        cost_buffer_reject_rate=40.0,
+        approval_precision_top_half=80.0,
+        approval_precision_bottom_half=20.0,
+        expectancy_by_confidence_bucket="low=-2.0 (3); mid=-0.5 (3); high=1.5 (4)",
     )
     defaults.update(overrides)
     return cm.RealBenchmarkRow(**defaults)
@@ -505,6 +517,10 @@ def test_real_benchmark_markdown_includes_required_same_path_fields():
     assert "rejected_by_disagreement_count: 0" in md
     assert "rejected_by_low_edge_count: 0" in md
     assert "kept_trade_count: 0" in md
+    assert "cost_buffer_reject_rate: 40.00" in md
+    assert "approval_precision_top_half: 80.00" in md
+    assert "approval_precision_bottom_half: 20.00" in md
+    assert "expectancy_by_confidence_bucket: low=-2.0 (3); mid=-0.5 (3); high=1.5 (4)" in md
     assert "fusion_reference_only" in md
     assert "reference only; never champion until deployable same-path semantics proven" in md
 
@@ -520,6 +536,10 @@ def test_model_leaderboard_markdown_uses_canonical_name_and_gate_fields():
         rejected_by_disagreement_count=3,
         rejected_by_low_edge_count=2,
         kept_trade_count=7,
+        cost_buffer_reject_rate=25.0,
+        approval_precision_top_half=66.67,
+        approval_precision_bottom_half=33.33,
+        expectancy_by_confidence_bucket="low=-1.0 (2); mid=0.5 (2); high=1.0 (3)",
         average_edge_kept=0.011,
         average_edge_rejected=0.004,
     )
@@ -531,6 +551,10 @@ def test_model_leaderboard_markdown_uses_canonical_name_and_gate_fields():
     assert "rejected_by_disagreement_count" in md
     assert "rejected_by_low_edge_count" in md
     assert "kept_trade_count" in md
+    assert "cost_buffer_reject_rate" in md
+    assert "approval_precision_top_half" in md
+    assert "approval_precision_bottom_half" in md
+    assert "expectancy_by_confidence_bucket" in md
     assert "average_edge_kept" in md
 
 
@@ -578,6 +602,36 @@ def test_fusion_reference_only_is_not_champion_eligible():
     )
 
     assert cm._is_eligible_for_champion(fusion_reference) is False
+
+
+def test_weekly_target_required_for_champion_eligibility():
+    import scripts.compare_models as cm
+
+    under_target = _make_real_benchmark_row(model_name="xgb", weekly_return_pct=0.9999)
+    deployable = _make_real_benchmark_row(model_name="xgb", weekly_return_pct=1.05)
+
+    assert cm._is_eligible_for_champion(under_target) is False
+    assert cm._is_eligible_for_champion(deployable) is True
+
+
+def test_approval_precision_diagnostics_bucket_confidence():
+    import scripts.compare_models as cm
+
+    diag = pd.DataFrame(
+        [
+            {"pnl": -2.0, "signal_confidence": 0.1},
+            {"pnl": -1.0, "signal_confidence": 0.2},
+            {"pnl": 0.5, "signal_confidence": 0.6},
+            {"pnl": 1.0, "signal_confidence": 0.9},
+        ]
+    )
+
+    result = cm._approval_precision_diagnostics(diag)
+
+    assert result["approval_precision_top_half"] == 100.0
+    assert result["approval_precision_bottom_half"] == 0.0
+    assert "low=" in result["expectancy_by_confidence_bucket"]
+    assert "high=" in result["expectancy_by_confidence_bucket"]
 
 
 def test_xgb_report_writers_emit_fix_and_ablation_sections(tmp_path):
