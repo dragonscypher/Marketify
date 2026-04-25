@@ -449,6 +449,14 @@ def test_next_status_reports_exact_fail_gap_for_xgb_real_path():
         approval_precision_bottom_half=20.0,
         expectancy_by_confidence_bucket="low=-2.0 (3); mid=-0.5 (3); high=1.5 (4)",
         pnl_by_confidence_bucket="low=-6.0 (3); mid=-1.5 (3); high=6.0 (4)",
+        selected_max_disagreement=0.006,
+        selected_approval_precision_threshold=0.4,
+        applied_max_disagreement=0.006,
+        applied_approval_precision_threshold=0.4,
+        final_trade_count=10,
+        final_approval_count=10,
+        final_keep_coverage_pct=7.2,
+        gate_config_match="YES",
     )
 
     md = cm.build_next_status_markdown(champion)
@@ -465,6 +473,14 @@ def test_next_status_reports_exact_fail_gap_for_xgb_real_path():
     assert "approval_precision_bottom_half: 20.00" in md
     assert "expectancy_by_confidence_bucket: low=-2.0 (3); mid=-0.5 (3); high=1.5 (4)" in md
     assert "pnl_by_confidence_bucket: low=-6.0 (3); mid=-1.5 (3); high=6.0 (4)" in md
+    assert "selected_max_disagreement: 0.006000" in md
+    assert "selected_approval_precision_threshold: 0.400000" in md
+    assert "applied_max_disagreement: 0.006000" in md
+    assert "applied_approval_precision_threshold: 0.400000" in md
+    assert "final_trade_count: 10" in md
+    assert "final_approval_count: 10" in md
+    assert "final_keep_coverage_pct: 7.20" in md
+    assert "gate_config_match: YES" in md
     assert "gap to 1.0% target: 0.3023 percentage points" in md
     assert "result: FAIL" in md
     assert "dominant_gate=below_cost_buffer" in md
@@ -501,6 +517,14 @@ def _make_real_benchmark_row(model_name: str = "xgb", **overrides):
         approval_precision_bottom_half=20.0,
         expectancy_by_confidence_bucket="low=-2.0 (3); mid=-0.5 (3); high=1.5 (4)",
         pnl_by_confidence_bucket="low=-6.0 (3); mid=-1.5 (3); high=6.0 (4)",
+        selected_max_disagreement=0.006,
+        selected_approval_precision_threshold=0.4,
+        applied_max_disagreement=0.006,
+        applied_approval_precision_threshold=0.4,
+        final_trade_count=10,
+        final_approval_count=10,
+        final_keep_coverage_pct=7.2,
+        gate_config_match="YES",
     )
     defaults.update(overrides)
     return cm.RealBenchmarkRow(**defaults)
@@ -532,6 +556,14 @@ def test_real_benchmark_markdown_includes_required_same_path_fields():
     assert "approval_precision_bottom_half: 20.00" in md
     assert "expectancy_by_confidence_bucket: low=-2.0 (3); mid=-0.5 (3); high=1.5 (4)" in md
     assert "pnl_by_confidence_bucket: low=-6.0 (3); mid=-1.5 (3); high=6.0 (4)" in md
+    assert "selected_max_disagreement: 0.006000" in md
+    assert "selected_approval_precision_threshold: 0.400000" in md
+    assert "applied_max_disagreement: 0.006000" in md
+    assert "applied_approval_precision_threshold: 0.400000" in md
+    assert "final_trade_count: 10" in md
+    assert "final_approval_count: 10" in md
+    assert "final_keep_coverage_pct: 7.20" in md
+    assert "gate_config_match: YES" in md
     assert "fusion_reference_only" in md
     assert "reference only; never champion until deployable same-path semantics proven" in md
 
@@ -563,6 +595,11 @@ def test_model_leaderboard_markdown_uses_canonical_name_and_gate_fields():
 
     assert "# Model Leaderboard" in md
     assert "current_champion: xgb" in md
+    assert "selected_max_disagreement" in md
+    assert "applied_max_disagreement" in md
+    assert "selected_approval_precision_threshold" in md
+    assert "applied_approval_precision_threshold" in md
+    assert "gate_config_match" in md
     assert "rejected_by_disagreement_count" in md
     assert "disagreement_reject_rate" in md
     assert "keep_rate_by_disagreement_bucket" in md
@@ -626,6 +663,25 @@ def test_signal_gate_thresholds_allow_cost_buffer_and_precision_overrides():
     assert abs(float(thresholds["edge_floor"]) - fee_floor) < 1e-12
     assert float(thresholds["min_confidence"]) == 0.42
     assert float(thresholds["max_disagreement"]) == 0.009
+
+
+def test_ordered_weak_feature_candidates_prioritizes_requested_features():
+    import scripts.compare_models as cm
+
+    importance_df = pd.DataFrame(
+        [
+            {"feature": "ret_5", "mean_importance": 0.0001},
+            {"feature": "is_afternoon", "mean_importance": 0.0002},
+            {"feature": "news_sentiment_score", "mean_importance": 0.0003},
+            {"feature": "volume_z20", "mean_importance": 0.0004},
+            {"feature": "news_risk", "mean_importance": 0.0005},
+            {"feature": "is_morning", "mean_importance": 0.0006},
+        ]
+    )
+
+    ordered = cm._ordered_weak_feature_candidates(importance_df, 5)
+
+    assert ordered[:4] == ["news_risk", "news_sentiment_score", "is_afternoon", "is_morning"]
 
 
 def test_fusion_reference_only_is_not_champion_eligible():

@@ -21,6 +21,13 @@ os.chdir(ROOT)
 SOURCE_OF_TRUTH_PATH = "scripts.compare_models:_run_real_lane"
 BASELINE_WEEKLY_PCT = 0.5851
 MIN_KEEP_COVERAGE_PCT = 5.0
+WEAK_XGB_FEATURE_PRIORITY = (
+    "news_risk",
+    "news_sentiment_score",
+    "is_afternoon",
+    "is_late",
+    "is_morning",
+)
 
 RecurrentArchitecture = Literal["gru", "lstm"]
 RecurrentLabelMode = Literal["return", "direction"]
@@ -82,6 +89,14 @@ class RealBenchmarkRow:
     approval_precision_bottom_half: float = 0.0
     expectancy_by_confidence_bucket: str = "unavailable"
     pnl_by_confidence_bucket: str = "unavailable"
+    selected_max_disagreement: float = 0.0
+    selected_approval_precision_threshold: float = 0.0
+    applied_max_disagreement: float = 0.0
+    applied_approval_precision_threshold: float = 0.0
+    final_trade_count: int = 0
+    final_approval_count: int = 0
+    final_keep_coverage_pct: float = 0.0
+    gate_config_match: str = "YES"
     champion_eligible: bool = False
 
 
@@ -331,6 +346,24 @@ def _signal_gate_thresholds(config, gate_overrides: dict[str, float] | None = No
     }
 
 
+def _selected_gate_values(config, gate_overrides: dict[str, float] | None = None) -> dict[str, float]:
+    thresholds = _signal_gate_thresholds(config, gate_overrides=gate_overrides)
+    return {
+        "selected_max_disagreement": float(thresholds["max_disagreement"]),
+        "selected_approval_precision_threshold": float(thresholds["min_confidence"]),
+    }
+
+
+def _gate_config_match(selected: dict[str, float], applied: dict[str, float], tol: float = 1e-12) -> str:
+    return "YES" if (
+        abs(float(selected["selected_max_disagreement"]) - float(applied["applied_max_disagreement"])) <= tol
+        and abs(
+            float(selected["selected_approval_precision_threshold"])
+            - float(applied["applied_approval_precision_threshold"])
+        ) <= tol
+    ) else "NO"
+
+
 def _apply_signal_gate(
     feat: pd.DataFrame,
     preds: pd.Series,
@@ -494,6 +527,11 @@ def _run_real_lane(
     metrics = _compute_real_metrics(result["equity"], trade_diag)
     precision_diag = _approval_precision_diagnostics(trade_diag)
     keep_coverage_pct = float(metrics["keep_coverage_pct"])
+    selected_gate = _selected_gate_values(config, gate_overrides=gate_overrides)
+    applied_gate = {
+        "applied_max_disagreement": float(cast(float, gate_stats["selected_max_disagreement"])),
+        "applied_approval_precision_threshold": float(cast(float, gate_stats["selected_approval_precision_threshold"])),
+    }
     row = RealBenchmarkRow(
         model_name=model_name,
         role=role,
@@ -527,6 +565,14 @@ def _run_real_lane(
         approval_precision_bottom_half=float(precision_diag["approval_precision_bottom_half"]),
         expectancy_by_confidence_bucket=str(precision_diag["expectancy_by_confidence_bucket"]),
         pnl_by_confidence_bucket=str(precision_diag["pnl_by_confidence_bucket"]),
+        selected_max_disagreement=float(selected_gate["selected_max_disagreement"]),
+        selected_approval_precision_threshold=float(selected_gate["selected_approval_precision_threshold"]),
+        applied_max_disagreement=float(applied_gate["applied_max_disagreement"]),
+        applied_approval_precision_threshold=float(applied_gate["applied_approval_precision_threshold"]),
+        final_trade_count=int(metrics["trade_count"]),
+        final_approval_count=int(metrics["approval_count"]),
+        final_keep_coverage_pct=keep_coverage_pct,
+        gate_config_match=_gate_config_match(selected_gate, applied_gate),
         champion_eligible=False,
     )
     row.champion_eligible = _is_eligible_for_champion(row)
@@ -590,6 +636,14 @@ def _failed_model_row(model_name: str, notes: str) -> RealBenchmarkRow:
         approval_precision_bottom_half=0.0,
         expectancy_by_confidence_bucket="unavailable",
         pnl_by_confidence_bucket="unavailable",
+        selected_max_disagreement=0.0,
+        selected_approval_precision_threshold=0.0,
+        applied_max_disagreement=0.0,
+        applied_approval_precision_threshold=0.0,
+        final_trade_count=0,
+        final_approval_count=0,
+        final_keep_coverage_pct=0.0,
+        gate_config_match="YES",
         champion_eligible=False,
     )
 
@@ -897,6 +951,14 @@ def _build_benchmark_summary(champion_row: RealBenchmarkRow | None, display_row:
         "approval_precision_bottom_half": display_row.approval_precision_bottom_half,
         "expectancy_by_confidence_bucket": display_row.expectancy_by_confidence_bucket,
         "pnl_by_confidence_bucket": display_row.pnl_by_confidence_bucket,
+        "selected_max_disagreement": display_row.selected_max_disagreement,
+        "selected_approval_precision_threshold": display_row.selected_approval_precision_threshold,
+        "applied_max_disagreement": display_row.applied_max_disagreement,
+        "applied_approval_precision_threshold": display_row.applied_approval_precision_threshold,
+        "final_trade_count": display_row.final_trade_count,
+        "final_approval_count": display_row.final_approval_count,
+        "final_keep_coverage_pct": display_row.final_keep_coverage_pct,
+        "gate_config_match": display_row.gate_config_match,
         "average_edge_kept": display_row.average_edge_kept,
         "average_edge_rejected": display_row.average_edge_rejected,
         "expectancy": display_row.expectancy,
@@ -918,12 +980,12 @@ def build_model_leaderboard_markdown(
         "Real traded path only. xgb primary lane. recurrent/news/regime remain support or veto only.",
         f"current_champion: {current_champion}",
         "",
-        "| model_name | role | weekly_return_pct | sharpe | max_drawdown_pct | trade_count | approval_count | keep_coverage_pct | rejected_by_disagreement_count | disagreement_reject_rate | keep_rate_by_disagreement_bucket | approval_precision_top_half | approval_precision_bottom_half | expectancy_by_confidence_bucket | pnl_by_confidence_bucket | PASS/FAIL | exact_blocker | notes |",
-        "| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- | ---: | ---: | --- | --- | --- | --- | --- |",
+        "| model_name | role | weekly_return_pct | sharpe | max_drawdown_pct | trade_count | approval_count | keep_coverage_pct | selected_max_disagreement | applied_max_disagreement | selected_approval_precision_threshold | applied_approval_precision_threshold | gate_config_match | rejected_by_disagreement_count | disagreement_reject_rate | keep_rate_by_disagreement_bucket | approval_precision_top_half | approval_precision_bottom_half | expectancy_by_confidence_bucket | pnl_by_confidence_bucket | PASS/FAIL | exact_blocker | notes |",
+        "| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- | ---: | ---: | --- | ---: | ---: | --- | --- | --- | --- | --- |",
     ]
     for record in _build_model_compare_records(rows):
         lines.append(
-            f"| {record['model_name']} | {record['role']} | {_fmt_metric(record['weekly_return_pct'])} | {_fmt_metric(record['sharpe'])} | {_fmt_metric(record['max_drawdown_pct'])} | {record['trade_count']} | {record['approval_count']} | {_fmt_metric(record['keep_coverage_pct'], digits=2)} | {record['rejected_by_disagreement_count']} | {_fmt_metric(record['disagreement_reject_rate'], digits=2)} | {record['keep_rate_by_disagreement_bucket']} | {_fmt_metric(record['approval_precision_top_half'], digits=2)} | {_fmt_metric(record['approval_precision_bottom_half'], digits=2)} | {record['expectancy_by_confidence_bucket']} | {record['pnl_by_confidence_bucket']} | {record['PASS_FAIL']} | {record['exact_blocker']} | {record['notes']} |"
+            f"| {record['model_name']} | {record['role']} | {_fmt_metric(record['weekly_return_pct'])} | {_fmt_metric(record['sharpe'])} | {_fmt_metric(record['max_drawdown_pct'])} | {record['trade_count']} | {record['approval_count']} | {_fmt_metric(record['keep_coverage_pct'], digits=2)} | {_fmt_metric(record['selected_max_disagreement'], digits=6)} | {_fmt_metric(record['applied_max_disagreement'], digits=6)} | {_fmt_metric(record['selected_approval_precision_threshold'], digits=6)} | {_fmt_metric(record['applied_approval_precision_threshold'], digits=6)} | {record['gate_config_match']} | {record['rejected_by_disagreement_count']} | {_fmt_metric(record['disagreement_reject_rate'], digits=2)} | {record['keep_rate_by_disagreement_bucket']} | {_fmt_metric(record['approval_precision_top_half'], digits=2)} | {_fmt_metric(record['approval_precision_bottom_half'], digits=2)} | {record['expectancy_by_confidence_bucket']} | {record['pnl_by_confidence_bucket']} | {record['PASS_FAIL']} | {record['exact_blocker']} | {record['notes']} |"
         )
     lines += [
         "",
@@ -962,6 +1024,14 @@ def build_real_benchmark_markdown(
         f"approval_precision_bottom_half: {_fmt_metric(summary['approval_precision_bottom_half'], digits=2)}",
         f"expectancy_by_confidence_bucket: {summary['expectancy_by_confidence_bucket']}",
         f"pnl_by_confidence_bucket: {summary['pnl_by_confidence_bucket']}",
+        f"selected_max_disagreement: {_fmt_metric(summary['selected_max_disagreement'], digits=6)}",
+        f"selected_approval_precision_threshold: {_fmt_metric(summary['selected_approval_precision_threshold'], digits=6)}",
+        f"applied_max_disagreement: {_fmt_metric(summary['applied_max_disagreement'], digits=6)}",
+        f"applied_approval_precision_threshold: {_fmt_metric(summary['applied_approval_precision_threshold'], digits=6)}",
+        f"final_trade_count: {summary['final_trade_count']}",
+        f"final_approval_count: {summary['final_approval_count']}",
+        f"final_keep_coverage_pct: {_fmt_metric(summary['final_keep_coverage_pct'], digits=2)}",
+        f"gate_config_match: {summary['gate_config_match']}",
         f"average_edge_kept: {_fmt_metric(summary['average_edge_kept'], digits=6)}",
         f"average_edge_rejected: {_fmt_metric(summary['average_edge_rejected'], digits=6)}",
         f"expectancy: {_fmt_metric(summary['expectancy'], digits=6)}",
@@ -1020,6 +1090,14 @@ def build_next_status_markdown(
         f"- approval_precision_bottom_half: {_fmt_metric(summary['approval_precision_bottom_half'], digits=2)}",
         f"- expectancy_by_confidence_bucket: {summary['expectancy_by_confidence_bucket']}",
         f"- pnl_by_confidence_bucket: {summary['pnl_by_confidence_bucket']}",
+        f"- selected_max_disagreement: {_fmt_metric(summary['selected_max_disagreement'], digits=6)}",
+        f"- selected_approval_precision_threshold: {_fmt_metric(summary['selected_approval_precision_threshold'], digits=6)}",
+        f"- applied_max_disagreement: {_fmt_metric(summary['applied_max_disagreement'], digits=6)}",
+        f"- applied_approval_precision_threshold: {_fmt_metric(summary['applied_approval_precision_threshold'], digits=6)}",
+        f"- final_trade_count: {summary['final_trade_count']}",
+        f"- final_approval_count: {summary['final_approval_count']}",
+        f"- final_keep_coverage_pct: {_fmt_metric(summary['final_keep_coverage_pct'], digits=2)}",
+        f"- gate_config_match: {summary['gate_config_match']}",
         f"- average_edge_kept: {_fmt_metric(summary['average_edge_kept'], digits=6)}",
         f"- average_edge_rejected: {_fmt_metric(summary['average_edge_rejected'], digits=6)}",
         f"- expectancy: {_fmt_metric(summary['expectancy'], digits=6)}",
@@ -1197,6 +1275,23 @@ def _feature_variant_sets(feature_cols: list[str], low_importance_cols: list[str
     return {name: cols for name, cols in variants.items() if len(cols) >= 5 and set(cols) != feature_set}
 
 
+def _ordered_weak_feature_candidates(importance_df: pd.DataFrame, limit: int) -> list[str]:
+    if importance_df.empty:
+        return []
+
+    ranked = importance_df["feature"].astype(str).tolist()
+    chosen: list[str] = []
+    for feature in WEAK_XGB_FEATURE_PRIORITY:
+        if feature in ranked and feature not in chosen:
+            chosen.append(feature)
+    for feature in ranked:
+        if feature not in chosen:
+            chosen.append(feature)
+        if len(chosen) >= limit:
+            break
+    return chosen[:limit]
+
+
 def _rank_xgb_fixes(
     xgb_row: RealBenchmarkRow,
     trade_diag: pd.DataFrame,
@@ -1217,7 +1312,7 @@ def _rank_xgb_fixes(
         )
 
     if not importance_df.empty:
-        weakest = importance_df.head(min(5, len(importance_df)))["feature"].tolist()
+        weakest = _ordered_weak_feature_candidates(importance_df, min(5, len(importance_df)))
         if weakest:
             ranked.append(
                 (
@@ -1320,6 +1415,14 @@ def _write_false_positive_trade_review(
         f"- winning_trades: {len(wins)}",
         f"- loss_share_pct: {round(len(losses) / max(len(diag), 1) * 100.0, 2)}",
         f"- loss_expectancy: {round(float(losses['pnl'].mean()), 4) if len(losses) else 0.0}",
+        f"- selected_max_disagreement: {_fmt_metric(xgb_row.selected_max_disagreement, digits=6)}",
+        f"- selected_approval_precision_threshold: {_fmt_metric(xgb_row.selected_approval_precision_threshold, digits=6)}",
+        f"- applied_max_disagreement: {_fmt_metric(xgb_row.applied_max_disagreement, digits=6)}",
+        f"- applied_approval_precision_threshold: {_fmt_metric(xgb_row.applied_approval_precision_threshold, digits=6)}",
+        f"- final_trade_count: {xgb_row.final_trade_count}",
+        f"- final_approval_count: {xgb_row.final_approval_count}",
+        f"- final_keep_coverage_pct: {_fmt_metric(xgb_row.final_keep_coverage_pct, digits=2)}",
+        f"- gate_config_match: {xgb_row.gate_config_match}",
         f"- expectancy_by_confidence_bucket: {diag_precision['expectancy_by_confidence_bucket']}",
         f"- pnl_by_confidence_bucket: {diag_precision['pnl_by_confidence_bucket']}",
         "",
@@ -1918,11 +2021,21 @@ def main(argv: list[str] | None = None) -> int:
     display_row = champion_row or _select_reference_row(complete_rows)
 
     fix_lines: list[str] = []
+    source_of_truth_row = display_row
     xgb_pair = result_by_model.get("xgb")
     if xgb_pair is not None:
         xgb_row, xgb_result = xgb_pair
+        source_of_truth_row = xgb_row
+        if xgb_row.gate_config_match != "YES":
+            raise RuntimeError(
+                "tuned gate config mismatch: "
+                f"selected_max_disagreement={xgb_row.selected_max_disagreement:.6f} "
+                f"applied_max_disagreement={xgb_row.applied_max_disagreement:.6f} "
+                f"selected_approval_precision_threshold={xgb_row.selected_approval_precision_threshold:.6f} "
+                f"applied_approval_precision_threshold={xgb_row.applied_approval_precision_threshold:.6f}"
+            )
         importance_df = _rolling_xgb_feature_importance(feat, feature_cols, "target_next_ret", config.model)
-        low_importance_cols = importance_df.head(min(8, len(importance_df)))["feature"].tolist() if not importance_df.empty else []
+        low_importance_cols = _ordered_weak_feature_candidates(importance_df, min(8, len(importance_df)))
         ablation_rows: list[dict] = []
         support_preds = _support_comparison_preds("xgb", prediction_rows)
         for variant_name, variant_cols in _feature_variant_sets(feature_cols, low_importance_cols).items():
@@ -1993,11 +2106,11 @@ def main(argv: list[str] | None = None) -> int:
         encoding="utf-8",
     )
     (output_dir / "real_benchmark.md").write_text(
-        build_real_benchmark_markdown(champion_row, display_row, rows),
+        build_real_benchmark_markdown(champion_row, source_of_truth_row, rows),
         encoding="utf-8",
     )
     (output_dir / "NEXT_STATUS.md").write_text(
-        build_next_status_markdown(champion_row, display_row, fix_lines=fix_lines),
+        build_next_status_markdown(champion_row, source_of_truth_row, fix_lines=fix_lines),
         encoding="utf-8",
     )
 
@@ -2007,9 +2120,9 @@ def main(argv: list[str] | None = None) -> int:
     print(f"[COMPARE] next={output_dir / 'NEXT_STATUS.md'}")
     print(
         "[COMPARE] RESULT: "
-        f"{_pass_fail_label(display_row)} champion={champion_row.model_name if champion_row is not None else 'NONE'} "
-        f"weekly={display_row.weekly_return_pct}% gap={_gap_to_target_pct_points(display_row.weekly_return_pct)} "
-        f"sharpe={display_row.sharpe} dd={display_row.max_drawdown_pct}% trades={display_row.trade_count}"
+        f"{_pass_fail_label(source_of_truth_row)} champion={champion_row.model_name if champion_row is not None else 'NONE'} "
+        f"weekly={source_of_truth_row.weekly_return_pct}% gap={_gap_to_target_pct_points(source_of_truth_row.weekly_return_pct)} "
+        f"sharpe={source_of_truth_row.sharpe} dd={source_of_truth_row.max_drawdown_pct}% trades={source_of_truth_row.trade_count}"
     )
     return 0
 
