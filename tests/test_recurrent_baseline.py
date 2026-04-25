@@ -438,11 +438,223 @@ def test_next_status_reports_exact_fail_gap_for_xgb_real_path():
         gate_keep_ratio_pct=44.0,
         top_blocker="below_cost_buffer",
         notes="primary real benchmark lane",
+        daily_return_pct=0.1395,
+        approval_count=10,
+        keep_coverage_pct=7.2,
     )
 
     md = cm.build_next_status_markdown(champion)
 
     assert "current champion: xgb" in md
+    assert "daily_return_pct: 0.1395" in md
+    assert "cvar_95_pct: 0.05" in md
+    assert "approval_count: 10" in md
+    assert "rejected_by_disagreement_count: 0" in md
+    assert "rejected_by_low_edge_count: 0" in md
+    assert "kept_trade_count: 0" in md
     assert "gap to 1.0% target: 0.3023 percentage points" in md
     assert "result: FAIL" in md
     assert "dominant_gate=below_cost_buffer" in md
+
+
+def _make_real_benchmark_row(model_name: str = "xgb", **overrides):
+    import scripts.compare_models as cm
+
+    defaults = dict(
+        model_name=model_name,
+        role="candidate",
+        weekly_return_pct=0.6977,
+        sharpe=1.2268,
+        max_drawdown_pct=0.1933,
+        cvar_95_pct=0.0500,
+        trade_count=10,
+        win_rate_pct=60.0,
+        expectancy=1.0,
+        weekly_target_pass=False,
+        comparison_only=False,
+        run_status="COMPLETE",
+        gate_block_count=12,
+        gate_keep_ratio_pct=44.0,
+        top_blocker="below_cost_buffer",
+        notes="same-path real benchmark lane",
+        daily_return_pct=0.1395,
+        approval_count=10,
+        keep_coverage_pct=7.2,
+    )
+    defaults.update(overrides)
+    return cm.RealBenchmarkRow(**defaults)
+
+
+def test_real_benchmark_markdown_includes_required_same_path_fields():
+    import scripts.compare_models as cm
+
+    champion = _make_real_benchmark_row(model_name="xgb", role="champion")
+    fusion_reference = _make_real_benchmark_row(
+        model_name="fusion_reference_only",
+        role="reference",
+        comparison_only=True,
+        notes="reference only; never champion until deployable same-path semantics proven",
+    )
+
+    md = cm.build_real_benchmark_markdown(champion, champion, [champion, fusion_reference])
+
+    assert "source_of_truth_path: scripts.compare_models:_run_real_lane" in md
+    assert "daily_return_pct: 0.1395" in md
+    assert "cvar_95_pct: 0.05" in md
+    assert "approval_count: 10" in md
+    assert "rejected_by_disagreement_count: 0" in md
+    assert "rejected_by_low_edge_count: 0" in md
+    assert "kept_trade_count: 0" in md
+    assert "fusion_reference_only" in md
+    assert "reference only; never champion until deployable same-path semantics proven" in md
+
+
+def test_model_leaderboard_markdown_uses_canonical_name_and_gate_fields():
+    import scripts.compare_models as cm
+
+    champion = _make_real_benchmark_row(model_name="xgb", role="champion")
+    comparison = _make_real_benchmark_row(
+        model_name="ridge",
+        role="candidate",
+        weekly_return_pct=0.401,
+        rejected_by_disagreement_count=3,
+        rejected_by_low_edge_count=2,
+        kept_trade_count=7,
+        average_edge_kept=0.011,
+        average_edge_rejected=0.004,
+    )
+
+    md = cm.build_model_leaderboard_markdown(champion, [champion, comparison])
+
+    assert "# Model Leaderboard" in md
+    assert "current_champion: xgb" in md
+    assert "rejected_by_disagreement_count" in md
+    assert "rejected_by_low_edge_count" in md
+    assert "kept_trade_count" in md
+    assert "average_edge_kept" in md
+
+
+def test_signal_gate_tracks_disagreement_and_low_edge_counts():
+    import scripts.compare_models as cm
+    from marketify.config import AppConfig
+
+    idx = pd.date_range("2026-01-01", periods=3, freq="5min")
+    feat = pd.DataFrame(
+        {
+            "news_sentiment_score": [0.0, 0.0, 0.0],
+            "news_risk": [0.0, 0.0, 0.0],
+            "news_event_shock": [0.0, 0.0, 0.0],
+            "vix_proxy": [10.0, 10.0, 10.0],
+            "macro_regime_bear": [0.0, 0.0, 0.0],
+            "macro_vol_level_high": [0.0, 0.0, 0.0],
+            "macro_event_risk": [0.0, 0.0, 0.0],
+            "vol_20": [0.01, 0.01, 0.01],
+        },
+        index=idx,
+    )
+    preds = pd.Series([0.00001, 0.01, 0.012], index=idx)
+    support_preds = {
+        "gru": pd.Series([0.00001, -0.01, 0.0115], index=idx),
+    }
+
+    gated, stats = cm._apply_signal_gate(feat, preds, AppConfig(), comparison_preds=support_preds)
+
+    assert int(stats["rejected_by_low_edge_count"]) == 1
+    assert int(stats["rejected_by_disagreement_count"]) == 1
+    assert int(stats["kept_trade_count"]) == 1
+    assert float(stats["average_edge_kept"]) > 0.0
+    assert float(stats["average_edge_rejected"]) > 0.0
+    assert int(gated.notna().sum()) == 1
+
+
+def test_fusion_reference_only_is_not_champion_eligible():
+    import scripts.compare_models as cm
+
+    fusion_reference = _make_real_benchmark_row(
+        model_name="fusion_reference_only",
+        role="reference",
+        comparison_only=True,
+        notes="reference only",
+    )
+
+    assert cm._is_eligible_for_champion(fusion_reference) is False
+
+
+def test_xgb_report_writers_emit_fix_and_ablation_sections(tmp_path):
+    import scripts.compare_models as cm
+
+    xgb_row = _make_real_benchmark_row(model_name="xgb", role="champion")
+    trade_diag = pd.DataFrame(
+        [
+            {
+                "timestamp": "2026-01-01T09:35:00Z",
+                "side": "LONG",
+                "pnl": -1.2,
+                "return_pct": -0.4,
+                "signal_confidence": 0.32,
+                "expected_return": 0.1,
+                "entry_news_risk": 0.9,
+                "entry_news_event_shock": 1.0,
+                "entry_vol_regime_ratio": 1.4,
+                "entry_signal_quality_20": 0.2,
+                "exit_reason": "stop",
+            },
+            {
+                "timestamp": "2026-01-01T10:10:00Z",
+                "side": "LONG",
+                "pnl": 0.8,
+                "return_pct": 0.3,
+                "signal_confidence": 0.78,
+                "expected_return": 0.2,
+                "entry_news_risk": 0.1,
+                "entry_news_event_shock": 0.0,
+                "entry_vol_regime_ratio": 0.9,
+                "entry_signal_quality_20": 0.8,
+                "exit_reason": "target",
+            },
+        ]
+    )
+    importance_df = pd.DataFrame(
+        [
+            {"feature": "sin_hour", "mean_importance": 0.001, "window_count": 4},
+            {"feature": "news_risk_score", "mean_importance": 0.002, "window_count": 4},
+            {"feature": "ret_5", "mean_importance": 0.12, "window_count": 4},
+        ]
+    )
+    ablation_rows = [
+        {
+            "variant": "drop_time_features",
+            "feature_count": 18,
+            "weekly_return_pct": 0.8123,
+            "delta_weekly_return_pct": 0.1146,
+            "daily_return_pct": 0.1625,
+            "sharpe": 1.35,
+            "max_drawdown_pct": 0.18,
+            "cvar_95_pct": 0.04,
+            "trade_count": 11,
+            "approval_count": 11,
+            "expectancy": 1.1,
+            "keep_coverage_pct": 7.4,
+            "eligible": "YES",
+            "recommendation": "KEEP",
+        }
+    ]
+    fix_lines = [
+        "Keep drop_time_features: improved weekly by +0.1146 pct points without collapsing coverage.",
+        "Tighten deterministic news veto only if same-path xgb improves.",
+        "Raise xgb approval precision on low-confidence trades.",
+    ]
+
+    cm._write_false_positive_trade_review(xgb_row, trade_diag, fix_lines, tmp_path)
+    cm._write_feature_ablation_md(xgb_row, importance_df, ablation_rows, tmp_path)
+    next_status = cm.build_next_status_markdown(xgb_row, fix_lines=fix_lines)
+
+    false_positive_md = (tmp_path / "false_positive_trade_review.md").read_text(encoding="utf-8")
+    feature_ablation_md = (tmp_path / "feature_ablation.md").read_text(encoding="utf-8")
+
+    assert "Top 3 Highest-Impact Fixes" in false_positive_md
+    assert "News-Risk Buckets" in false_positive_md
+    assert "Weak/Noisy Candidates" in feature_ablation_md
+    assert "drop_time_features" in feature_ablation_md
+    assert "Rolling XGB Feature Importance Audit" in feature_ablation_md
+    assert "## Top 3 Highest-Impact Fixes" in next_status
