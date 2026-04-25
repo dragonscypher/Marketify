@@ -442,9 +442,11 @@ def test_next_status_reports_exact_fail_gap_for_xgb_real_path():
         approval_count=10,
         keep_coverage_pct=7.2,
         cost_buffer_reject_rate=40.0,
+        keep_rate_by_gate="kept=44.00%; below_cost_buffer=40.00%",
         approval_precision_top_half=80.0,
         approval_precision_bottom_half=20.0,
         expectancy_by_confidence_bucket="low=-2.0 (3); mid=-0.5 (3); high=1.5 (4)",
+        pnl_by_confidence_bucket="low=-6.0 (3); mid=-1.5 (3); high=6.0 (4)",
     )
 
     md = cm.build_next_status_markdown(champion)
@@ -457,9 +459,11 @@ def test_next_status_reports_exact_fail_gap_for_xgb_real_path():
     assert "rejected_by_low_edge_count: 0" in md
     assert "kept_trade_count: 0" in md
     assert "cost_buffer_reject_rate: 40.00" in md
+    assert "keep_rate_by_gate: kept=44.00%; below_cost_buffer=40.00%" in md
     assert "approval_precision_top_half: 80.00" in md
     assert "approval_precision_bottom_half: 20.00" in md
     assert "expectancy_by_confidence_bucket: low=-2.0 (3); mid=-0.5 (3); high=1.5 (4)" in md
+    assert "pnl_by_confidence_bucket: low=-6.0 (3); mid=-1.5 (3); high=6.0 (4)" in md
     assert "gap to 1.0% target: 0.3023 percentage points" in md
     assert "result: FAIL" in md
     assert "dominant_gate=below_cost_buffer" in md
@@ -489,9 +493,11 @@ def _make_real_benchmark_row(model_name: str = "xgb", **overrides):
         approval_count=10,
         keep_coverage_pct=7.2,
         cost_buffer_reject_rate=40.0,
+        keep_rate_by_gate="kept=44.00%; below_cost_buffer=40.00%",
         approval_precision_top_half=80.0,
         approval_precision_bottom_half=20.0,
         expectancy_by_confidence_bucket="low=-2.0 (3); mid=-0.5 (3); high=1.5 (4)",
+        pnl_by_confidence_bucket="low=-6.0 (3); mid=-1.5 (3); high=6.0 (4)",
     )
     defaults.update(overrides)
     return cm.RealBenchmarkRow(**defaults)
@@ -518,9 +524,11 @@ def test_real_benchmark_markdown_includes_required_same_path_fields():
     assert "rejected_by_low_edge_count: 0" in md
     assert "kept_trade_count: 0" in md
     assert "cost_buffer_reject_rate: 40.00" in md
+    assert "keep_rate_by_gate: kept=44.00%; below_cost_buffer=40.00%" in md
     assert "approval_precision_top_half: 80.00" in md
     assert "approval_precision_bottom_half: 20.00" in md
     assert "expectancy_by_confidence_bucket: low=-2.0 (3); mid=-0.5 (3); high=1.5 (4)" in md
+    assert "pnl_by_confidence_bucket: low=-6.0 (3); mid=-1.5 (3); high=6.0 (4)" in md
     assert "fusion_reference_only" in md
     assert "reference only; never champion until deployable same-path semantics proven" in md
 
@@ -537,9 +545,11 @@ def test_model_leaderboard_markdown_uses_canonical_name_and_gate_fields():
         rejected_by_low_edge_count=2,
         kept_trade_count=7,
         cost_buffer_reject_rate=25.0,
+        keep_rate_by_gate="kept=55.00%; below_cost_buffer=25.00%; model_disagreement=10.00%",
         approval_precision_top_half=66.67,
         approval_precision_bottom_half=33.33,
         expectancy_by_confidence_bucket="low=-1.0 (2); mid=0.5 (2); high=1.0 (3)",
+        pnl_by_confidence_bucket="low=-2.0 (2); mid=1.0 (2); high=3.0 (3)",
         average_edge_kept=0.011,
         average_edge_rejected=0.004,
     )
@@ -552,9 +562,11 @@ def test_model_leaderboard_markdown_uses_canonical_name_and_gate_fields():
     assert "rejected_by_low_edge_count" in md
     assert "kept_trade_count" in md
     assert "cost_buffer_reject_rate" in md
+    assert "keep_rate_by_gate" in md
     assert "approval_precision_top_half" in md
     assert "approval_precision_bottom_half" in md
     assert "expectancy_by_confidence_bucket" in md
+    assert "pnl_by_confidence_bucket" in md
     assert "average_edge_kept" in md
 
 
@@ -588,6 +600,7 @@ def test_signal_gate_tracks_disagreement_and_low_edge_counts():
     assert int(stats["kept_trade_count"]) == 1
     assert float(stats["average_edge_kept"]) > 0.0
     assert float(stats["average_edge_rejected"]) > 0.0
+    assert "kept=" in str(stats["keep_rate_by_gate"])
     assert int(gated.notna().sum()) == 1
 
 
@@ -677,6 +690,8 @@ def test_approval_precision_diagnostics_bucket_confidence():
     assert result["approval_precision_bottom_half"] == 0.0
     assert "low=" in result["expectancy_by_confidence_bucket"]
     assert "high=" in result["expectancy_by_confidence_bucket"]
+    assert "low=" in result["pnl_by_confidence_bucket"]
+    assert "high=" in result["pnl_by_confidence_bucket"]
 
 
 def test_xgb_report_writers_emit_fix_and_ablation_sections(tmp_path):
