@@ -437,8 +437,8 @@ class TestMultimodalBenchmarkReports:
         rows = mb._policy_grid(base_policy)
 
         assert rows
-        assert {row["fusion_max_model_disagreement"] for row in rows} == {0.006}
-        assert {row["fusion_abstain_margin"] for row in rows} == {0.0, 0.00005}
+        assert {row["fusion_max_model_disagreement"] for row in rows} == {0.004, 0.006}
+        assert {row["fusion_abstain_margin"] for row in rows} == {0.0}
 
     def test_policy_tuning_and_next_status_files_written(self, tmp_path):
         import scripts.run_multimodal_benchmark as mb
@@ -535,6 +535,9 @@ class TestMultimodalBenchmarkReports:
         assert "current champion: fusion" in next_status
         assert "cvar_95" in next_status
         assert "exact blocker" in next_status
+        assert "daily return" in next_status
+        assert "sortino" in next_status
+        assert "win rate" in next_status
 
 
 # ---------------------------------------------------------------------------

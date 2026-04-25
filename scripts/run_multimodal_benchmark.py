@@ -52,7 +52,7 @@ VALIDATION_FRACTION = 0.15
 
 _GRID_MIN_CONFIDENCE = [0.30, 0.35]
 _GRID_EXPECTED_FLOOR = [0.00030, 0.00035]
-_GRID_ABSTAIN_MARGIN = [0.0, 0.00005]
+_GRID_MAX_DISAGREEMENT = [0.004, 0.006]
 _GRID_NEWS_CUTOFF = [0.70, 0.75]
 _GRID_REGIME_CUTOFF = [28.0, 30.0]
 _GRID_MIN_HOLDING_BARS = [0, 6]
@@ -215,7 +215,7 @@ def _policy_grid(base_policy: dict) -> list[dict]:
     for combo in itertools.product(
         _GRID_MIN_CONFIDENCE,
         _GRID_EXPECTED_FLOOR,
-        _GRID_ABSTAIN_MARGIN,
+        _GRID_MAX_DISAGREEMENT,
         _GRID_NEWS_CUTOFF,
         _GRID_REGIME_CUTOFF,
         _GRID_MIN_HOLDING_BARS,
@@ -224,8 +224,8 @@ def _policy_grid(base_policy: dict) -> list[dict]:
             {
                 "fusion_min_confidence": float(combo[0]),
                 "fusion_expected_return_floor": float(combo[1]),
-                "fusion_abstain_margin": float(combo[2]),
-                "fusion_max_model_disagreement": float(base_policy["fusion_max_model_disagreement"]),
+                "fusion_abstain_margin": float(base_policy["fusion_abstain_margin"]),
+                "fusion_max_model_disagreement": float(combo[2]),
                 "fusion_news_risk_cutoff": float(combo[3]),
                 "fusion_regime_vix_cutoff": float(combo[4]),
                 "fusion_min_holding_bars": int(combo[5]),
@@ -475,11 +475,14 @@ def _write_next_status(
         "## Current Champion",
         f"- current champion: {winner['model']}",
         f"- weekly return: {w['weekly_return_pct']}%",
-        f"- gap to 1.0% target: {current_gap} percentage points",
+        f"- daily return: {w['daily_return_pct']}%",
         f"- sharpe: {w['sharpe_ratio']}",
+        f"- sortino: {w['sortino_ratio']}",
         f"- max drawdown: {w['max_drawdown_pct']}%",
         f"- cvar_95: {w['cvar_95_pct']}%",
         f"- trade count: {w['trade_count']}",
+        f"- win rate: {w['win_rate_pct']}%",
+        f"- gap to 1.0% target: {current_gap} percentage points",
         f"- result: {w['weekly_status']}",
         f"- exact blocker: {exact_blocker}",
         "",
