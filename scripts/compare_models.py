@@ -757,8 +757,10 @@ def _tune_real_path_gate_knobs(
     base_thresholds = _signal_gate_thresholds(config)
     base_min_confidence = float(base_thresholds["min_confidence"])
     base_max_disagreement = float(base_thresholds["max_disagreement"])
+    base_abstain_margin = float(base_thresholds["abstain_margin"])
     approval_precision_threshold_candidates = sorted(
         {
+            round(max(base_min_confidence - 0.10, 0.25), 6),
             round(max(base_min_confidence - 0.05, 0.30), 6),
             round(base_min_confidence, 6),
             round(min(base_min_confidence + 0.05, 0.80), 6),
@@ -767,23 +769,35 @@ def _tune_real_path_gate_knobs(
     max_disagreement_candidates = sorted(
         {
             round(base_max_disagreement, 6),
-            round(base_max_disagreement * 1.25, 6),
             round(base_max_disagreement * 1.50, 6),
+            round(base_max_disagreement * 2.00, 6),
+            round(base_max_disagreement * 2.50, 6),
+            round(base_max_disagreement * 3.00, 6),
+        }
+    )
+    abstain_margin_candidates = sorted(
+        {
+            round(max(base_abstain_margin * 0.5, 0.00005), 6),
+            round(base_abstain_margin, 6),
+            round(base_abstain_margin * 2.0, 6),
         }
     )
 
     best_overrides = {
         "max_disagreement": base_max_disagreement,
         "approval_precision_threshold": base_min_confidence,
+        "abstain_margin": base_abstain_margin,
     }
     best_score: tuple[float, ...] | None = None
     best_row: RealBenchmarkRow | None = None
 
     for max_disagreement in max_disagreement_candidates:
         for approval_precision_threshold in approval_precision_threshold_candidates:
+            for abstain_margin in abstain_margin_candidates:
                 overrides = {
                     "max_disagreement": float(max_disagreement),
                     "approval_precision_threshold": float(approval_precision_threshold),
+                    "abstain_margin": float(abstain_margin),
                 }
                 trial_row, _trial_result = _run_real_lane(
                     model_name="xgb",

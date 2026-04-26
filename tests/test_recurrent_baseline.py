@@ -699,6 +699,7 @@ def test_tune_real_path_gate_knobs_prioritizes_coverage_then_expectancy_then_wee
         lambda config, gate_overrides=None: {
             "min_confidence": 0.35,
             "max_disagreement": 0.006,
+            "abstain_margin": 0.0001,
         },
     )
 
@@ -722,7 +723,7 @@ def test_tune_real_path_gate_knobs_prioritizes_coverage_then_expectancy_then_wee
         support_preds={},
     )
 
-    assert best == {"max_disagreement": 0.006, "approval_precision_threshold": 0.4}
+    assert best == {"max_disagreement": 0.006, "approval_precision_threshold": 0.4, "abstain_margin": 5e-05}
 
 
 def test_fusion_reference_only_is_not_champion_eligible():
