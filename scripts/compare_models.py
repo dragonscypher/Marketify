@@ -758,8 +758,27 @@ def _tune_real_path_gate_knobs(
     base_min_confidence = float(base_thresholds["min_confidence"])
     base_max_disagreement = float(base_thresholds["max_disagreement"])
     base_abstain_margin = float(base_thresholds["abstain_margin"])
+
+    disagreement_values: list[float] = []
+    xgb_aligned = pd.to_numeric(xgb_preds, errors="coerce").reindex(feat.index)
+    for support_pred in support_preds.values():
+        support_aligned = pd.to_numeric(support_pred, errors="coerce").reindex(feat.index)
+        deltas = (xgb_aligned - support_aligned).abs().replace([np.inf, -np.inf], np.nan).dropna()
+        if not deltas.empty:
+            disagreement_values.extend(float(value) for value in deltas.to_numpy(dtype=float) if np.isfinite(value))
+
+    disagreement_quantile_candidates: set[float] = set()
+    if disagreement_values:
+        disagreement_array = np.asarray(disagreement_values, dtype=float)
+        disagreement_quantile_candidates = {
+            round(float(np.quantile(disagreement_array, quantile)), 6)
+            for quantile in (0.70, 0.80, 0.90, 0.95, 0.98, 1.00)
+        }
+
     approval_precision_threshold_candidates = sorted(
         {
+            0.20,
+            0.25,
             round(max(base_min_confidence - 0.10, 0.25), 6),
             round(max(base_min_confidence - 0.05, 0.30), 6),
             round(base_min_confidence, 6),
@@ -773,10 +792,15 @@ def _tune_real_path_gate_knobs(
             round(base_max_disagreement * 2.00, 6),
             round(base_max_disagreement * 2.50, 6),
             round(base_max_disagreement * 3.00, 6),
+            round(base_max_disagreement * 5.00, 6),
+            round(base_max_disagreement * 8.00, 6),
+            round(base_max_disagreement * 12.00, 6),
+            *disagreement_quantile_candidates,
         }
     )
     abstain_margin_candidates = sorted(
         {
+            0.0,
             round(max(base_abstain_margin * 0.5, 0.00005), 6),
             round(base_abstain_margin, 6),
             round(base_abstain_margin * 2.0, 6),
@@ -823,8 +847,9 @@ def _tune_real_path_gate_knobs(
                     -float(trial_row.rejected_by_disagreement_count),
                     -float(trial_row.rejected_by_low_edge_count),
                     -_finite_sort_metric(trial_row.max_drawdown_pct),
-                    -abs(float(max_disagreement) - base_max_disagreement),
-                    -abs(float(approval_precision_threshold) - base_min_confidence),
+                    _finite_sort_metric(float(max_disagreement)),
+                    -_finite_sort_metric(float(approval_precision_threshold)),
+                    -_finite_sort_metric(float(abstain_margin)),
                 )
                 if best_score is None or score > best_score:
                     best_score = score
@@ -836,6 +861,7 @@ def _tune_real_path_gate_knobs(
             "[COMPARE] tuned_gate "
             f"max_disagreement={best_overrides['max_disagreement']:.6f} "
             f"approval_precision_threshold={best_overrides['approval_precision_threshold']:.6f} "
+            f"abstain_margin={best_overrides['abstain_margin']:.6f} "
             f"weekly={best_row.weekly_return_pct}% sharpe={best_row.sharpe} trades={best_row.trade_count} "
             f"keep={best_row.keep_coverage_pct}% disagreement_rejects={best_row.rejected_by_disagreement_count} "
             f"disagreement_reject_rate={best_row.disagreement_reject_rate}% top_half_precision={best_row.approval_precision_top_half}"
@@ -1036,6 +1062,7 @@ def build_real_benchmark_markdown(
         f"rejected_by_disagreement_count: {summary['rejected_by_disagreement_count']}",
         f"rejected_by_low_edge_count: {summary['rejected_by_low_edge_count']}",
         f"disagreement_reject_rate: {_fmt_metric(summary['disagreement_reject_rate'], digits=2)}",
+        f"keep_rate_by_gate: {summary['keep_rate_by_gate']}",
         f"keep_rate_by_disagreement_bucket: {summary['keep_rate_by_disagreement_bucket']}",
         f"kept_trade_count: {summary['kept_trade_count']}",
         f"approval_precision_top_half: {_fmt_metric(summary['approval_precision_top_half'], digits=2)}",
@@ -1060,14 +1087,14 @@ def build_real_benchmark_markdown(
         f"exact_blocker: {summary['exact_blocker']}",
         "",
         "## Model Compare",
-        "| model_name | daily_return_pct | weekly_return_pct | baseline_weekly_pct | sharpe | max_drawdown_pct | cvar_95_pct | trade_count | approval_count | keep_coverage_pct | rejected_by_disagreement_count | disagreement_reject_rate | keep_rate_by_disagreement_bucket | approval_precision_top_half | approval_precision_bottom_half | expectancy_by_confidence_bucket | pnl_by_confidence_bucket | expectancy | eligibility | PASS/FAIL | run_status | top_blocker | notes |",
-        "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|---:|---:|---|---|---:|---|---|---|---|---|",
+        "| model_name | daily_return_pct | weekly_return_pct | baseline_weekly_pct | sharpe | max_drawdown_pct | cvar_95_pct | trade_count | approval_count | keep_coverage_pct | rejected_by_disagreement_count | disagreement_reject_rate | keep_rate_by_gate | keep_rate_by_disagreement_bucket | approval_precision_top_half | approval_precision_bottom_half | expectancy_by_confidence_bucket | pnl_by_confidence_bucket | expectancy | eligibility | PASS/FAIL | run_status | top_blocker | notes |",
+        "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|---|---:|---:|---|---|---:|---|---|---|---|---|",
     ]
     for record in _build_model_compare_records(rows):
         lines.append(
             f"| {record['model_name']} | {_fmt_metric(record['daily_return_pct'])} | {_fmt_metric(record['weekly_return_pct'])} | {_fmt_metric(record['baseline_weekly_pct'])} | "
             f"{_fmt_metric(record['sharpe'])} | {_fmt_metric(record['max_drawdown_pct'])} | {_fmt_metric(record['cvar_95_pct'])} | {record['trade_count']} | {record['approval_count']} | "
-            f"{_fmt_metric(record['keep_coverage_pct'], digits=2)} | {record['rejected_by_disagreement_count']} | {_fmt_metric(record['disagreement_reject_rate'], digits=2)} | {record['keep_rate_by_disagreement_bucket']} | {_fmt_metric(record['approval_precision_top_half'], digits=2)} | {_fmt_metric(record['approval_precision_bottom_half'], digits=2)} | {record['expectancy_by_confidence_bucket']} | {record['pnl_by_confidence_bucket']} | {_fmt_metric(record['expectancy'], digits=6)} | "
+            f"{_fmt_metric(record['keep_coverage_pct'], digits=2)} | {record['rejected_by_disagreement_count']} | {_fmt_metric(record['disagreement_reject_rate'], digits=2)} | {record['keep_rate_by_gate']} | {record['keep_rate_by_disagreement_bucket']} | {_fmt_metric(record['approval_precision_top_half'], digits=2)} | {_fmt_metric(record['approval_precision_bottom_half'], digits=2)} | {record['expectancy_by_confidence_bucket']} | {record['pnl_by_confidence_bucket']} | {_fmt_metric(record['expectancy'], digits=6)} | "
             f"{record['eligibility']} | {record['PASS_FAIL']} | {record['run_status']} | {record['top_blocker']} | {record['notes']} |"
         )
     lines += [
@@ -1103,6 +1130,7 @@ def build_next_status_markdown(
         f"- keep_coverage_pct: {_fmt_metric(summary['keep_coverage_pct'], digits=2)}",
         f"- rejected_by_disagreement_count: {summary['rejected_by_disagreement_count']}",
         f"- disagreement_reject_rate: {_fmt_metric(summary['disagreement_reject_rate'], digits=2)}",
+        f"- keep_rate_by_gate: {summary['keep_rate_by_gate']}",
         f"- keep_rate_by_disagreement_bucket: {summary['keep_rate_by_disagreement_bucket']}",
         f"- kept_trade_count: {summary['kept_trade_count']}",
         f"- approval_precision_top_half: {_fmt_metric(summary['approval_precision_top_half'], digits=2)}",
@@ -2012,7 +2040,7 @@ def main(argv: list[str] | None = None) -> int:
 
     for model_name, preds in prediction_rows.items():
         comparison_preds = _support_comparison_preds(model_name, prediction_rows)
-        role = "reference" if model_name == "fusion_reference_only" else "candidate"
+        role = "candidate" if model_name == "xgb" else "reference" if model_name == "fusion_reference_only" else "comparison"
         notes = {
             "xgb": "primary signal lane on source-of-truth path",
             "ridge": "same-path baseline comparator",
