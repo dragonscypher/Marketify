@@ -21,6 +21,20 @@ os.chdir(ROOT)
 SOURCE_OF_TRUTH_PATH = "scripts.compare_models:_run_real_lane"
 BASELINE_WEEKLY_PCT = 0.5851
 MIN_KEEP_COVERAGE_PCT = 5.0
+PRIOR_LIVE_COLAB_REFERENCE = {
+    "commit_hash": "04f9cf3",
+    "weekly_return_pct": 5.3847,
+    "daily_return_pct": 0.0296,
+    "sharpe": 0.9614,
+    "max_drawdown_pct": 2.5196,
+    "cvar_95_pct": 1.5274,
+    "trade_count": 2,
+    "approval_count": 2,
+    "keep_coverage_pct": 3.70,
+    "expectancy": 1.915000,
+    "pass_fail": "FAIL",
+    "exact_blocker": "gap_to_target=0.0 pct_points; keep_coverage<5.0%; dominant_gate=model_disagreement",
+}
 WEAK_XGB_FEATURE_PRIORITY = (
     "news_risk",
     "news_sentiment_score",
@@ -995,6 +1009,7 @@ def _build_benchmark_summary(champion_row: RealBenchmarkRow | None, display_row:
         "rejected_by_disagreement_count": display_row.rejected_by_disagreement_count,
         "rejected_by_low_edge_count": display_row.rejected_by_low_edge_count,
         "kept_trade_count": display_row.kept_trade_count,
+        "dominant_gate": display_row.top_blocker,
         "cost_buffer_reject_rate": display_row.cost_buffer_reject_rate,
         "disagreement_reject_rate": display_row.disagreement_reject_rate,
         "keep_rate_by_gate": display_row.keep_rate_by_gate,
@@ -1072,6 +1087,7 @@ def build_real_benchmark_markdown(
         f"rejected_by_low_edge_count: {summary['rejected_by_low_edge_count']}",
         f"disagreement_reject_rate: {_fmt_metric(summary['disagreement_reject_rate'], digits=2)}",
         f"keep_rate_by_gate: {summary['keep_rate_by_gate']}",
+        f"dominant_gate: {summary['dominant_gate']}",
         f"keep_rate_by_disagreement_bucket: {summary['keep_rate_by_disagreement_bucket']}",
         f"kept_trade_count: {summary['kept_trade_count']}",
         f"approval_precision_top_half: {_fmt_metric(summary['approval_precision_top_half'], digits=2)}",
@@ -1140,6 +1156,7 @@ def build_next_status_markdown(
         f"- rejected_by_disagreement_count: {summary['rejected_by_disagreement_count']}",
         f"- disagreement_reject_rate: {_fmt_metric(summary['disagreement_reject_rate'], digits=2)}",
         f"- keep_rate_by_gate: {summary['keep_rate_by_gate']}",
+        f"- dominant_gate: {summary['dominant_gate']}",
         f"- keep_rate_by_disagreement_bucket: {summary['keep_rate_by_disagreement_bucket']}",
         f"- kept_trade_count: {summary['kept_trade_count']}",
         f"- approval_precision_top_half: {_fmt_metric(summary['approval_precision_top_half'], digits=2)}",
@@ -1181,20 +1198,47 @@ def build_iteration_log_markdown(
     champion_row: RealBenchmarkRow | None,
     source_of_truth_row: RealBenchmarkRow,
     gate_overrides: dict[str, float] | None,
+    config,
 ) -> str:
     summary = _build_benchmark_summary(champion_row, source_of_truth_row)
     gate_overrides = gate_overrides or {}
-    exact_knob_changes = (
-        "model_disagreement_threshold="
-        f"{_fmt_metric(gate_overrides.get('max_disagreement', source_of_truth_row.selected_max_disagreement), digits=6)}; "
-        "approval_precision_threshold="
-        f"{_fmt_metric(gate_overrides.get('approval_precision_threshold', source_of_truth_row.selected_approval_precision_threshold), digits=6)}; "
-        "abstain_margin="
-        f"{_fmt_metric(gate_overrides.get('abstain_margin', 0.0), digits=6)}; "
-        f"keep_coverage_floor_guard={_fmt_metric(MIN_KEEP_COVERAGE_PCT, digits=2)}"
-    )
+    base_thresholds = _signal_gate_thresholds(config)
+    selected_knobs = {
+        "model_disagreement_threshold": float(
+            gate_overrides.get("max_disagreement", source_of_truth_row.selected_max_disagreement)
+        ),
+        "approval_precision_threshold": float(
+            gate_overrides.get("approval_precision_threshold", source_of_truth_row.selected_approval_precision_threshold)
+        ),
+        "abstain_margin": float(gate_overrides.get("abstain_margin", base_thresholds["abstain_margin"])),
+    }
+    base_knobs = {
+        "model_disagreement_threshold": float(base_thresholds["max_disagreement"]),
+        "approval_precision_threshold": float(base_thresholds["min_confidence"]),
+        "abstain_margin": float(base_thresholds["abstain_margin"]),
+    }
+    changed_parts: list[str] = []
+    unchanged_parts: list[str] = []
+    for knob_name, selected_value in selected_knobs.items():
+        base_value = base_knobs[knob_name]
+        if abs(selected_value - base_value) > 1e-12:
+            changed_parts.append(
+                f"{knob_name}: {_fmt_metric(base_value, digits=6)} -> {_fmt_metric(selected_value, digits=6)}"
+            )
+        else:
+            unchanged_parts.append(f"{knob_name}={_fmt_metric(selected_value, digits=6)}")
+    exact_knob_changes = "; ".join(changed_parts) if changed_parts else "none"
+    unchanged_knobs = "; ".join(unchanged_parts)
     keep_rule = "KEEP" if _is_eligible_for_champion(source_of_truth_row) else "REJECT"
     stop_reason = "deployable_champion_reached" if keep_rule == "KEEP" else "continue_gate_iteration"
+    prior = PRIOR_LIVE_COLAB_REFERENCE
+    delta_keep_coverage_pct = float(cast(float, summary["keep_coverage_pct"])) - float(
+        cast(float, prior["keep_coverage_pct"])
+    )
+    delta_expectancy = float(cast(float, summary["expectancy"])) - float(cast(float, prior["expectancy"]))
+    delta_weekly_return_pct = float(cast(float, summary["weekly_return_pct"])) - float(
+        cast(float, prior["weekly_return_pct"])
+    )
     lines = [
         "# Iteration Log",
         "",
@@ -1206,6 +1250,8 @@ def build_iteration_log_markdown(
         f"- source_of_truth_path: {summary['source_of_truth_path']}",
         "- architecture: xgb primary; recurrent support/context only; news/regime/risk veto only",
         f"- exact_knob_changes: {exact_knob_changes}",
+        f"- changed_deployability_knob_count: {len(changed_parts)}",
+        f"- unchanged_deployability_knobs: {unchanged_knobs}; keep_coverage_floor_guard={_fmt_metric(MIN_KEEP_COVERAGE_PCT, digits=2)}",
         f"- champion_model: {summary['champion_model']}",
         f"- weekly_return_pct: {_fmt_metric(summary['weekly_return_pct'])}",
         f"- daily_return_pct: {_fmt_metric(summary['daily_return_pct'])}",
@@ -1218,6 +1264,7 @@ def build_iteration_log_markdown(
         f"- expectancy: {_fmt_metric(summary['expectancy'], digits=6)}",
         f"- disagreement_reject_rate: {_fmt_metric(summary['disagreement_reject_rate'], digits=2)}",
         f"- keep_rate_by_gate: {summary['keep_rate_by_gate']}",
+        f"- dominant_gate: {summary['dominant_gate']}",
         f"- keep_rate_by_disagreement_bucket: {summary['keep_rate_by_disagreement_bucket']}",
         f"- kept_trade_count: {summary['kept_trade_count']}",
         f"- approval_precision_top_half: {_fmt_metric(summary['approval_precision_top_half'], digits=2)}",
@@ -1226,6 +1273,14 @@ def build_iteration_log_markdown(
         f"- pnl_by_confidence_bucket: {summary['pnl_by_confidence_bucket']}",
         f"- PASS/FAIL: {summary['PASS_FAIL']}",
         f"- exact_blocker: {summary['exact_blocker']}",
+        f"- prior_iteration_commit: {prior['commit_hash']}",
+        f"- prior_keep_coverage_pct: {_fmt_metric(prior['keep_coverage_pct'], digits=2)}",
+        f"- prior_expectancy: {_fmt_metric(prior['expectancy'], digits=6)}",
+        f"- prior_weekly_return_pct: {_fmt_metric(prior['weekly_return_pct'])}",
+        f"- delta_keep_coverage_pct: {delta_keep_coverage_pct:+.2f}",
+        f"- delta_expectancy: {delta_expectancy:+.6f}",
+        f"- delta_weekly_return_pct: {delta_weekly_return_pct:+.4f}",
+        "- keep_decision_rule: keep only if keep_coverage moves toward >= 5.0, expectancy > 0, weekly >= 1.0",
         f"- keep_or_revert: {keep_rule}",
         f"- stop_reason: {stop_reason}",
     ]
@@ -2234,7 +2289,7 @@ def main(argv: list[str] | None = None) -> int:
         encoding="utf-8",
     )
     (output_dir / "iteration_log.md").write_text(
-        build_iteration_log_markdown(champion_row, source_of_truth_row, gate_overrides),
+        build_iteration_log_markdown(champion_row, source_of_truth_row, gate_overrides, config),
         encoding="utf-8",
     )
 
