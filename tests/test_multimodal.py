@@ -230,7 +230,7 @@ class TestFusionModel:
 # ---------------------------------------------------------------------------
 
 class TestMultimodalBenchmarkReports:
-    """Integration test: run minimal benchmark, verify all 5 report files are written."""
+    """Integration test: run minimal benchmark, verify required fusion report files are written."""
 
     def _make_dummy_rows(self, tmp_dir: Path) -> list[dict]:
         """Return fake row list mimicking benchmark runner output."""
@@ -241,7 +241,7 @@ class TestMultimodalBenchmarkReports:
         })
         return [
             {
-                "model": "ridge",
+                "model": "fusion",
                 "metrics": {
                     "weekly_return_pct": 0.25,
                     "daily_return_pct": 0.05,
@@ -266,22 +266,54 @@ class TestMultimodalBenchmarkReports:
             }
         ]
 
-    def test_all_five_report_files_written(self, tmp_path):
+    def _make_policy_row(self) -> dict:
+        return {
+            "policy": {
+                "fusion_min_confidence": 0.35,
+                "fusion_expected_return_floor": 0.00035,
+                "fusion_abstain_margin": 0.00005,
+                "fusion_max_model_disagreement": 0.004,
+                "fusion_news_risk_cutoff": 0.70,
+                "fusion_regime_vix_cutoff": 28.0,
+            },
+            "metrics": {
+                "weekly_return_pct": 0.9,
+                "daily_return_pct": 0.05,
+                "sharpe_ratio": 0.4,
+                "sortino_ratio": 0.8,
+                "max_drawdown_pct": 0.3,
+                "cvar_95_pct": 0.1,
+                "trade_count": 12,
+                "approval_count": 12,
+                "keep_coverage_pct": 10.0,
+                "win_rate_pct": 58.0,
+                "expectancy": 1.0,
+                "weekly_pass": False,
+                "daily_pass": False,
+                "weekly_status": "FAIL",
+                "daily_status": "FAIL",
+                "target_weekly_pct": 1.0,
+                "target_daily_pct": 1.0,
+            },
+            "validation_start_ts": "2026-01-01 00:00:00",
+        }
+
+    def test_required_fusion_report_files_written(self, tmp_path):
         import scripts.run_multimodal_benchmark as mb
 
         rows = self._make_dummy_rows(tmp_path)
         best = rows[0]
-        mb._write_leaderboard(rows, tmp_path)
-        mb._write_real_benchmark_md(best, rows, tmp_path)
-        mb._write_trades_and_equity(best["model"], rows, tmp_path)
+        policy_row = self._make_policy_row()
+
+        mb._write_fusion_policy_tuning([policy_row], tmp_path)
+        mb._write_real_benchmark_md(best, policy_row, tmp_path)
+        mb._write_next_status(policy_row, best, tmp_path)
 
         for fname in [
-            "model_leaderboard.csv",
-            "model_leaderboard.md",
-            "real_trading_benchmark.csv",
-            "real_trading_benchmark.md",
-            "multimodal_trades.csv",
-            "multimodal_equity_curve.csv",
+            "fusion_policy_tuning.csv",
+            "fusion_policy_tuning.md",
+            "multimodal_real_benchmark.md",
+            "NEXT_STATUS.md",
         ]:
             assert (tmp_path / fname).exists(), f"Missing: {fname}"
 
@@ -290,8 +322,8 @@ class TestMultimodalBenchmarkReports:
 
         rows = self._make_dummy_rows(tmp_path)
         best = rows[0]
-        mb._write_real_benchmark_md(best, rows, tmp_path)
-        content = (tmp_path / "real_trading_benchmark.md").read_text()
+        mb._write_real_benchmark_md(best, self._make_policy_row(), tmp_path)
+        content = (tmp_path / "multimodal_real_benchmark.md").read_text()
         assert "FAIL" in content
         assert "0.25" in content  # actual weekly return present
 
@@ -326,11 +358,10 @@ class TestMultimodalBenchmarkReports:
             }
         ]
         best = rows[0]
-        mb._write_real_benchmark_md(best, rows, tmp_path)
-        content = (tmp_path / "real_trading_benchmark.md").read_text()
-        assert "PASS" in content
-        # Weekly PASS → no WARNING block should appear
-        assert "WARNING: FAIL" not in content
+        mb._write_real_benchmark_md(best, self._make_policy_row(), tmp_path)
+        content = (tmp_path / "multimodal_real_benchmark.md").read_text()
+        assert "REFERENCE_ONLY" in content
+        assert "current champion: NONE" in content
 
     def test_pick_best_model_by_weekly_return(self):
         import scripts.run_multimodal_benchmark as mb
@@ -444,9 +475,10 @@ class TestMultimodalBenchmarkReports:
                 "trade_diagnostics": pd.DataFrame({"pnl": pd.Series(dtype=float)}),
             }
         ]
-        mb._write_real_benchmark_md(rows[0], rows, tmp_path)
-        content = (tmp_path / "real_trading_benchmark.md").read_text()
+        mb._write_real_benchmark_md(rows[0], self._make_policy_row(), tmp_path)
+        content = (tmp_path / "multimodal_real_benchmark.md").read_text()
         assert "INVALID_FOR_CHAMPION_SELECTION" in content
+        assert "current champion: NONE" in content
 
     def test_xgb_real_leaderboard_files_written(self, tmp_path):
         import scripts.run_multimodal_benchmark as mb
@@ -508,13 +540,14 @@ class TestMultimodalBenchmarkReports:
             "fusion_max_model_disagreement": 0.006,
             "fusion_news_risk_cutoff": 0.75,
             "fusion_regime_vix_cutoff": 30.0,
-            "fusion_min_holding_bars": 0,
         }
         rows = mb._policy_grid(base_policy)
 
         assert rows
         assert {row["fusion_max_model_disagreement"] for row in rows} == {0.004, 0.006}
-        assert {row["fusion_abstain_margin"] for row in rows} == {0.0}
+        assert {row["fusion_abstain_margin"] for row in rows} == {0.0, 0.00005}
+        assert {row["fusion_news_risk_cutoff"] for row in rows} == {0.70, 0.75}
+        assert all("fusion_min_holding_bars" not in row for row in rows)
 
     def test_policy_tuning_and_next_status_files_written(self, tmp_path):
         import scripts.run_multimodal_benchmark as mb
@@ -528,7 +561,6 @@ class TestMultimodalBenchmarkReports:
                     "fusion_max_model_disagreement": 0.004,
                     "fusion_news_risk_cutoff": 0.70,
                     "fusion_regime_vix_cutoff": 28.0,
-                    "fusion_min_holding_bars": 6,
                 },
                 "metrics": {
                     "weekly_return_pct": 0.9,
@@ -552,10 +584,10 @@ class TestMultimodalBenchmarkReports:
                 "validation_start_ts": "2026-01-01 00:00:00",
             }
         ]
-        baseline = {
+        final_fusion = {
             "model": "fusion",
             "metrics": {
-                "weekly_return_pct": 0.9833,
+                "weekly_return_pct": 1.01,
                 "daily_return_pct": 0.0405,
                 "sharpe_ratio": 0.3512,
                 "sortino_ratio": 1.2457,
@@ -566,59 +598,33 @@ class TestMultimodalBenchmarkReports:
                 "keep_coverage_pct": 8.0,
                 "win_rate_pct": 55.56,
                 "expectancy": 1.2453,
-                "weekly_pass": False,
+                "weekly_return_pct": 1.01,
+                "weekly_pass": True,
+                "weekly_status": "PASS",
                 "daily_pass": False,
-                "weekly_status": "FAIL",
                 "daily_status": "FAIL",
                 "target_weekly_pct": 1.0,
                 "target_daily_pct": 1.0,
             },
         }
-        tuned = {
-            "model": "fusion",
-            "metrics": {
-                **baseline["metrics"],
-                "weekly_return_pct": 1.01,
-                "weekly_pass": True,
-                "weekly_status": "PASS",
-            },
-        }
-        winner = tuned
-        xgb_primary = RealBenchmarkRow(
-            model_name="xgb",
-            role="champion",
-            weekly_return_pct=0.6977,
-            sharpe=1.2268,
-            max_drawdown_pct=0.1933,
-            cvar_95_pct=0.0556,
-            trade_count=10,
-            win_rate_pct=60.0,
-            expectancy=1.0,
-            weekly_target_pass=False,
-            comparison_only=False,
-            run_status="COMPLETE",
-            gate_block_count=12,
-            gate_keep_ratio_pct=44.0,
-            top_blocker="below_cost_buffer",
-            notes="primary single-model lane",
-        )
 
         mb._write_fusion_policy_tuning(tuning_rows, tmp_path)
-        mb._write_next_status(xgb_primary, baseline, tuning_rows[0], tuned, winner, tmp_path)
+        mb._write_next_status(tuning_rows[0], final_fusion, tmp_path)
 
-        assert (tmp_path / "validation_policy_tuning.csv").exists()
-        assert (tmp_path / "validation_policy_tuning.md").exists()
+        assert (tmp_path / "fusion_policy_tuning.csv").exists()
+        assert (tmp_path / "fusion_policy_tuning.md").exists()
         assert (tmp_path / "NEXT_STATUS.md").exists()
-        assert "fusion_abstain_margin" in (tmp_path / "validation_policy_tuning.md").read_text(encoding="utf-8")
+        assert "fusion_abstain_margin" in (tmp_path / "fusion_policy_tuning.md").read_text(encoding="utf-8")
         next_status = (tmp_path / "NEXT_STATUS.md").read_text(encoding="utf-8")
-        assert "abstain_margin" in next_status
-        assert "final_real_traded_champion" in next_status
-        assert "final_real_traded_cvar_95_pct" in next_status
-        assert "exact blocker" in next_status
-        assert "final_real_traded_daily_return_pct" in next_status
-        assert "final_real_traded_sortino" in next_status
-        assert "win_rate_pct" in next_status
-        assert "final_real_traded_approval_count" in next_status
+        assert "source_of_truth_path" in next_status
+        assert "current champion" in next_status
+        assert "current champion: NONE" in next_status
+        assert "cvar_95" in next_status
+        assert "exact blocker to 1.0%" in next_status
+        assert "daily return" in next_status
+        assert "sortino" in next_status
+        assert "cost buffer" in next_status
+        assert "REFERENCE_ONLY" in next_status
 
 
 # ---------------------------------------------------------------------------

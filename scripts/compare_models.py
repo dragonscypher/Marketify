@@ -796,12 +796,11 @@ def _tune_real_path_gate_knobs(
                     notes="xgb primary lane gate calibration",
                 )
                 score = (
-                    float(int(float(trial_row.expectancy) > 0.0)),
                     float(int(float(trial_row.keep_coverage_pct) >= MIN_KEEP_COVERAGE_PCT)),
-                    float(int(trial_row.trade_count > 0 and trial_row.approval_count > 0)),
+                    float(int(float(trial_row.expectancy) > 0.0)),
                     float(int(float(trial_row.weekly_return_pct) >= 1.0)),
-                    _finite_sort_metric(trial_row.expectancy),
                     _finite_sort_metric(trial_row.keep_coverage_pct),
+                    _finite_sort_metric(trial_row.expectancy),
                     float(trial_row.trade_count),
                     float(trial_row.approval_count),
                     _finite_sort_metric(trial_row.approval_precision_top_half),

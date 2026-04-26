@@ -689,7 +689,7 @@ def test_ordered_weak_feature_candidates_prioritizes_requested_features():
     assert ordered[:4] == ["news_risk", "news_sentiment_score", "is_afternoon", "is_morning"]
 
 
-def test_tune_real_path_gate_knobs_prioritizes_expectancy_then_coverage_then_trades(monkeypatch):
+def test_tune_real_path_gate_knobs_prioritizes_coverage_then_expectancy_then_weekly(monkeypatch):
     import scripts.compare_models as cm
     from marketify.config import AppConfig
 
@@ -707,7 +707,7 @@ def test_tune_real_path_gate_knobs_prioritizes_expectancy_then_coverage_then_tra
         key = (round(float(overrides["max_disagreement"]), 6), round(float(overrides["approval_precision_threshold"]), 6))
         row_map = {
             (0.006, 0.30): _make_real_benchmark_row(expectancy=-0.5, keep_coverage_pct=20.0, trade_count=12, approval_count=12, weekly_return_pct=2.0),
-            (0.006, 0.35): _make_real_benchmark_row(expectancy=0.2, keep_coverage_pct=6.0, trade_count=0, approval_count=0, weekly_return_pct=3.0),
+            (0.006, 0.35): _make_real_benchmark_row(expectancy=0.2, keep_coverage_pct=4.0, trade_count=4, approval_count=4, weekly_return_pct=3.0),
             (0.006, 0.40): _make_real_benchmark_row(expectancy=0.1, keep_coverage_pct=7.0, trade_count=2, approval_count=2, weekly_return_pct=0.8),
         }
         row = row_map.get(key, _make_real_benchmark_row(expectancy=-1.0, keep_coverage_pct=1.0, trade_count=0, approval_count=0, weekly_return_pct=0.1))
