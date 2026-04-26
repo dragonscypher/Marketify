@@ -1,19 +1,26 @@
 from __future__ import annotations
 
-import pandas as pd
+from pathlib import Path
+
 import gradio as gr
+import pandas as pd
 
 from marketify.broker.paper import PaperBroker
-from marketify.config import AppConfig, RISK_DISCLAIMER
+from marketify.config import RISK_DISCLAIMER, AppConfig
 from marketify.data.market_data import fetch_market_data
 from marketify.data.news_data import NewsProvider
 from marketify.features.sentiment import FinBERTSentiment
-from marketify.features.technical import TECHNICAL_FEATURE_COLUMNS, add_technical_features
-from marketify.models.ensemble import TradeIdeaInput, build_trade_idea, compute_cvar_95
+from marketify.features.technical import (TECHNICAL_FEATURE_COLUMNS,
+                                          add_technical_features)
+from marketify.models.ensemble import (TradeIdeaInput, build_trade_idea,
+                                       compute_cvar_95)
 from marketify.models.xgb_model import rolling_train_predict
+from marketify.onboarding import (apply_user_config, load_user_config,
+                                  save_user_config)
 from marketify.risk.risk_engine import RiskEngine
 from marketify.state.store import InMemoryStore
-from marketify.onboarding import load_user_config, save_user_config, apply_user_config
+
+REPORTS_DIR = Path("reports")
 
 
 def bootstrap() -> dict:
@@ -65,6 +72,56 @@ def _frames(state: dict | None) -> tuple[dict, pd.DataFrame, pd.DataFrame, pd.Da
     positions = pd.DataFrame(broker.get_positions())
     orders = pd.DataFrame(broker.get_orders())
     return state, account, positions, orders
+
+
+def _fills_frame(state: dict | None) -> pd.DataFrame:
+    state = _ensure_state(state)
+    broker: PaperBroker = state["broker"]
+    return pd.DataFrame(broker.get_fills())
+
+
+def _risk_events_frame(state: dict | None) -> pd.DataFrame:
+    state = _ensure_state(state)
+    broker: PaperBroker = state["broker"]
+    return pd.DataFrame(broker.get_risk_events())
+
+
+def _model_leaderboard_frame() -> pd.DataFrame:
+    path = REPORTS_DIR / "model_leaderboard.csv"
+    if not path.exists():
+        return pd.DataFrame(columns=["model_name", "weekly_return_pct", "daily_return_pct", "PASS/FAIL"])
+    try:
+        return pd.read_csv(path)
+    except Exception as exc:
+        return pd.DataFrame([{"error": f"failed_to_load_model_leaderboard: {exc}"}])
+
+
+def _benchmark_status_text() -> str:
+    path = REPORTS_DIR / "real_benchmark.md"
+    if not path.exists():
+        return "weekly_benchmark: UNKNOWN; daily_stress_benchmark: UNKNOWN; run scripts/compare_models.py"
+    text = path.read_text(encoding="utf-8")
+
+    def pick(key: str) -> str:
+        prefix = f"{key}:"
+        for line in text.splitlines():
+            if line.startswith(prefix):
+                return line.split(":", 1)[1].strip()
+        return "MISSING"
+
+    weekly = pick("weekly_return_pct")
+    daily = pick("daily_return_pct")
+    max_dd = pick("max_drawdown_pct")
+    result = pick("PASS/FAIL")
+    exact = pick("exact_blocker")
+    try:
+        daily_status = "PASS" if float(daily) >= 1.0 else "FAIL"
+    except ValueError:
+        daily_status = "UNKNOWN"
+    return (
+        f"weekly_benchmark: {result}; daily_stress_benchmark: {daily_status}; "
+        f"weekly_return_pct={weekly}; daily_return_pct={daily}; max_drawdown_pct={max_dd}; exact_blocker={exact}"
+    )
 
 
 def _idea_frame(state: dict | None) -> pd.DataFrame:
@@ -347,6 +404,50 @@ def refresh_account(state: dict | None):
     return state, _idea_frame(state), account, positions, orders
 
 
+def refresh_dashboard(state: dict | None):
+    state, account, positions, orders = _frames(state)
+    return (
+        state,
+        _idea_frame(state),
+        account,
+        positions,
+        orders,
+        _fills_frame(state),
+        _risk_events_frame(state),
+        _model_leaderboard_frame(),
+        _benchmark_status_text(),
+    )
+
+
+def reset_paper_account(state: dict | None, confirmation: str):
+    state = _ensure_state(state)
+    broker: PaperBroker = state["broker"]
+    if confirmation != "RESET PAPER":
+        state, account, positions, orders = _frames(state)
+        return (
+            state,
+            "Reset blocked. Type RESET PAPER to confirm paper-account reset.",
+            _idea_frame(state),
+            account,
+            positions,
+            orders,
+        )
+
+    broker.reset_account()
+    state["store"].clear_pending()
+    broker.append_audit("reset_paper_account", "confirmed")
+    broker.append_risk_event("paper_account_reset", "info", "user_confirmed_reset")
+    state, account, positions, orders = _frames(state)
+    return (
+        state,
+        "Paper account reset after explicit confirmation.",
+        _idea_frame(state),
+        account,
+        positions,
+        orders,
+    )
+
+
 def save_onboarding(
     state: dict | None,
     broker_backend: str,
@@ -443,7 +544,16 @@ with gr.Blocks(title="Marketify Paper Engine") as demo:
             suggestion = gr.Dataframe(label="Pending Trade Idea", interactive=False)
             account = gr.Dataframe(label="Account", interactive=False)
             positions = gr.Dataframe(label="Positions", interactive=False)
-            orders = gr.Dataframe(label="Orders", interactive=False)
+            orders = gr.Dataframe(label="Open Orders / Orders", interactive=False)
+            fills = gr.Dataframe(label="Fills", interactive=False)
+            risk_events = gr.Dataframe(label="Risk Events", interactive=False)
+            model_leaderboard = gr.Dataframe(label="Model Leaderboard", interactive=False)
+            benchmark_status = gr.Textbox(label="Benchmark Status (weekly core / daily stress)", interactive=False)
+
+            with gr.Row():
+                refresh_dashboard_btn = gr.Button("Refresh Dashboard")
+                reset_confirm = gr.Textbox(label="Reset paper account confirmation", value="", placeholder="Type RESET PAPER")
+                reset_paper_btn = gr.Button("Reset Paper Account", variant="stop")
 
             timer = gr.Timer(value=30.0)
 
@@ -483,10 +593,22 @@ with gr.Blocks(title="Marketify Paper Engine") as demo:
                 outputs=[app_state, status, suggestion, account, positions, orders],
             )
 
+            reset_paper_btn.click(
+                reset_paper_account,
+                inputs=[app_state, reset_confirm],
+                outputs=[app_state, status, suggestion, account, positions, orders],
+            )
+
+            refresh_dashboard_btn.click(
+                refresh_dashboard,
+                inputs=[app_state],
+                outputs=[app_state, suggestion, account, positions, orders, fills, risk_events, model_leaderboard, benchmark_status],
+            )
+
     demo.load(
-        refresh_account,
+        refresh_dashboard,
         inputs=[app_state],
-        outputs=[app_state, suggestion, account, positions, orders],
+        outputs=[app_state, suggestion, account, positions, orders, fills, risk_events, model_leaderboard, benchmark_status],
     )
 
 

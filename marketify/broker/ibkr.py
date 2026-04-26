@@ -7,10 +7,23 @@ No live orders ever submitted — paper account only.
 from __future__ import annotations
 
 import os
+from pathlib import Path
 from typing import Any
 
 from marketify.broker.base import BrokerBase
 from marketify.config import IBKRConfig
+
+
+def _load_dotenv_if_present(path: str | os.PathLike[str] = ".env") -> None:
+    env_path = Path(path)
+    if not env_path.exists():
+        return
+    for raw_line in env_path.read_text(encoding="utf-8").splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        os.environ.setdefault(key.strip(), value.strip().strip('"').strip("'"))
 
 
 class IBKRBroker(BrokerBase):
@@ -19,6 +32,19 @@ class IBKRBroker(BrokerBase):
     def __init__(self, config: IBKRConfig | None = None):
         self.config = config or IBKRConfig()
         self._ib = None  # lazy import ib_insync.IB
+
+    @classmethod
+    def from_env(cls) -> "IBKRBroker":
+        _load_dotenv_if_present()
+        cfg = IBKRConfig(
+            account_id=os.environ.get("IBKR_ACCOUNT_ID", ""),
+            host=os.environ.get("IBKR_HOST", os.environ.get("TWS_HOST", "127.0.0.1")),
+            port=int(os.environ.get("IBKR_PORT", os.environ.get("TWS_PORT", "7497"))),
+            client_id=int(os.environ.get("IBKR_CLIENT_ID", "1")),
+            paper=os.environ.get("IBKR_PAPER", "true").lower() in {"1", "true", "yes"},
+            read_only=True,
+        )
+        return cls(cfg)
 
     def _connect(self) -> Any:
         if self._ib is not None:
@@ -44,12 +70,15 @@ class IBKRBroker(BrokerBase):
 
     def connection_test(self) -> dict[str, Any]:
         """Test connection to TWS/Gateway. Returns account summary."""
+        if not self.config.paper:
+            return {"connected": False, "skipped": True, "reason": "IBKR paper account guard failed"}
         ib = self._connect()
         accounts = ib.managedAccounts()
         if not accounts:
             return {"connected": False, "error": "No managed accounts found"}
-        summary = ib.accountSummary(account=accounts[0])
-        result = {"connected": True, "account": accounts[0], "summary_count": len(summary)}
+        account_id = self.config.account_id or accounts[0]
+        summary = ib.accountSummary(account=account_id)
+        result = {"connected": True, "account": account_id, "read_only": self.config.read_only, "paper": self.config.paper, "summary_count": len(summary)}
         return result
 
     def get_account(self) -> dict[str, Any]:

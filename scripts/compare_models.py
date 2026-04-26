@@ -21,6 +21,7 @@ os.chdir(ROOT)
 SOURCE_OF_TRUTH_PATH = "scripts.compare_models:_run_real_lane"
 BASELINE_WEEKLY_PCT = 0.5851
 MIN_KEEP_COVERAGE_PCT = 5.0
+RISK_DRAWDOWN_LIMIT_PCT = 10.0
 PRIOR_LIVE_COLAB_REFERENCE = {
     "commit_hash": "04f9cf3",
     "weekly_return_pct": 5.3847,
@@ -294,6 +295,25 @@ def _is_eligible_for_champion(row: RealBenchmarkRow) -> bool:
 
 def _pass_fail_label(row: RealBenchmarkRow) -> str:
     return "PASS" if (_is_eligible_for_champion(row) and float(row.weekly_return_pct) >= 1.0) else "FAIL"
+
+
+def _weekly_benchmark_label(row: RealBenchmarkRow) -> str:
+    return "PASS" if float(row.weekly_return_pct) >= 1.0 and float(row.max_drawdown_pct) <= RISK_DRAWDOWN_LIMIT_PCT else "FAIL"
+
+
+def _daily_stress_label(row: RealBenchmarkRow) -> str:
+    return "PASS" if float(row.daily_return_pct) >= 1.0 and float(row.max_drawdown_pct) <= RISK_DRAWDOWN_LIMIT_PCT else "FAIL"
+
+
+def _daily_stress_blocker(row: RealBenchmarkRow) -> str:
+    if _daily_stress_label(row) == "PASS":
+        return "none"
+    parts: list[str] = []
+    if float(row.daily_return_pct) < 1.0:
+        parts.append("daily_return_pct below 1.0")
+    if float(row.max_drawdown_pct) > RISK_DRAWDOWN_LIMIT_PCT:
+        parts.append(f"max_drawdown_pct>{RISK_DRAWDOWN_LIMIT_PCT}")
+    return "; ".join(parts) or "daily_stress_not_met"
 
 
 def _champion_sort_key(row: RealBenchmarkRow) -> tuple[float, float, float, float, int]:
@@ -1030,6 +1050,9 @@ def _build_benchmark_summary(champion_row: RealBenchmarkRow | None, display_row:
         "average_edge_kept": display_row.average_edge_kept,
         "average_edge_rejected": display_row.average_edge_rejected,
         "expectancy": display_row.expectancy,
+        "weekly_benchmark": _weekly_benchmark_label(display_row),
+        "daily_stress_benchmark": _daily_stress_label(display_row),
+        "daily_stress_exact_blocker": _daily_stress_blocker(display_row),
         "eligibility": "YES" if champion_row is not None and _is_eligible_for_champion(display_row) else "NO",
         "PASS_FAIL": _pass_fail_label(display_row) if champion_row is not None else "FAIL",
         "exact_gap_to_1pct_target": _gap_to_target_pct_points(display_row.weekly_return_pct),
@@ -1060,6 +1083,54 @@ def build_model_leaderboard_markdown(
         "PASS only if weekly_return_pct >= 1.0 on real traded path.",
     ]
     return "\n".join(lines) + "\n"
+
+
+def _write_line_plot(series: pd.Series, path: Path, title: str, ylabel: str) -> None:
+    import importlib
+
+    plt = importlib.import_module("matplotlib.pyplot")
+
+    clean = pd.to_numeric(series, errors="coerce").dropna()
+    fig, ax = plt.subplots(figsize=(10, 4))
+    ax.plot(clean.index, clean.values, linewidth=1.4)
+    ax.set_title(title)
+    ax.set_ylabel(ylabel)
+    ax.grid(True, alpha=0.25)
+    fig.autofmt_xdate()
+    fig.tight_layout()
+    fig.savefig(str(path), dpi=140)
+    plt.close(fig)
+
+
+def _write_source_of_truth_artifacts(
+    source_result: dict[str, Any] | None,
+    rows: list[RealBenchmarkRow],
+    output_dir: Path,
+) -> None:
+    pd.DataFrame(_build_model_compare_records(rows)).to_csv(output_dir / "model_leaderboard.csv", index=False)
+    if source_result is None:
+        pd.DataFrame().to_csv(output_dir / "trades.csv", index=False)
+        pd.DataFrame(columns=["ts", "equity"]).to_csv(output_dir / "equity_curve.csv", index=False)
+        return
+
+    equity = pd.to_numeric(cast(pd.Series, source_result.get("equity", pd.Series(dtype=float))), errors="coerce").dropna()
+    trade_diag = cast(pd.DataFrame, source_result.get("trade_diagnostics", pd.DataFrame()))
+    fills = cast(pd.DataFrame, source_result.get("fills", pd.DataFrame()))
+    trades = trade_diag if not trade_diag.empty else fills
+    trades.to_csv(output_dir / "trades.csv", index=False)
+    pd.DataFrame({"ts": equity.index.astype(str), "equity": equity.values}).to_csv(output_dir / "equity_curve.csv", index=False)
+    if not trade_diag.empty:
+        trade_diag.to_csv(output_dir / "trade_diagnostics.csv", index=False)
+    if not fills.empty:
+        fills.to_csv(output_dir / "fills.csv", index=False)
+    if not equity.empty:
+        drawdown = (equity / equity.cummax() - 1.0) * 100.0
+        pd.DataFrame({"ts": equity.index.astype(str), "drawdown_pct": drawdown.values}).to_csv(
+            output_dir / "drawdown.csv",
+            index=False,
+        )
+        _write_line_plot(equity, output_dir / "equity_curve.png", "Source-of-truth equity curve", "Equity")
+        _write_line_plot(drawdown, output_dir / "drawdown.png", "Source-of-truth drawdown", "Drawdown %")
 
 
 def build_real_benchmark_markdown(
@@ -1106,6 +1177,9 @@ def build_real_benchmark_markdown(
         f"average_edge_kept: {_fmt_metric(summary['average_edge_kept'], digits=6)}",
         f"average_edge_rejected: {_fmt_metric(summary['average_edge_rejected'], digits=6)}",
         f"expectancy: {_fmt_metric(summary['expectancy'], digits=6)}",
+        f"weekly_benchmark: {summary['weekly_benchmark']}",
+        f"daily_stress_benchmark: {summary['daily_stress_benchmark']}",
+        f"daily_stress_exact_blocker: {summary['daily_stress_exact_blocker']}",
         f"eligibility: {summary['eligibility']}",
         f"PASS/FAIL: {summary['PASS_FAIL']}",
         f"exact_gap_to_1pct_target: {_fmt_metric(summary['exact_gap_to_1pct_target'])}",
@@ -1129,10 +1203,62 @@ def build_real_benchmark_markdown(
     return "\n".join(lines) + "\n"
 
 
+COLAB_COMMANDS_RUN = [
+    "python scripts/colab_check.py",
+    "python -m pip install -r requirements-colab.txt -q",
+    "python -m pip install -e . -q",
+    "python -m pytest tests/ -q",
+    "python scripts/validate_marketify.py",
+    "python scripts/train_and_check.py",
+    "python scripts/compare_models.py",
+    "cat reports/validation_summary.md",
+    "cat reports/model_leaderboard.md",
+    "cat reports/NEXT_STATUS.md",
+]
+
+
+def _load_json_report(path: Path) -> dict[str, Any] | None:
+    if not path.exists():
+        return None
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+
+
+def _validation_check(validation: dict[str, Any] | None, name: str) -> dict[str, Any] | None:
+    if not validation:
+        return None
+    for item in validation.get("results", []):
+        if item.get("name") == name:
+            return cast(dict[str, Any], item)
+    return None
+
+
+def _ops_summary(output_dir: Path) -> dict[str, Any]:
+    validation = _load_json_report(output_dir / "validation_summary.json")
+    training = _load_json_report(output_dir / "training_check_summary.json")
+    pytest_check = _validation_check(validation, "pytest")
+    ui_check = _validation_check(validation, "scripted_ui_flow_proof")
+    broker_check = _validation_check(validation, "broker_readiness")
+    ui_checks = ui_check.get("checks", {}) if ui_check else {}
+    return {
+        "validation_result": "PASS" if validation and validation.get("all_passed") else "MISSING_OR_FAIL",
+        "pytest_result": "PASS" if pytest_check and pytest_check.get("passed") else "MISSING_OR_FAIL",
+        "training_check_result": training.get("training_check_result", "MISSING") if training else "MISSING",
+        "ui_flow_result": "PASS" if ui_check and ui_check.get("passed") else "MISSING_OR_FAIL",
+        "ui_approval_works": "YES" if ui_checks.get("approve_paper_fill") else "NO",
+        "restart_reload_works": "YES" if ui_checks.get("restart_sqlite_reload") else "NO",
+        "broker_readiness_result": "PASS" if broker_check and broker_check.get("passed") else "MISSING_OR_FAIL",
+        "broker_readiness_details": broker_check.get("results", {}) if broker_check else {},
+    }
+
+
 def build_next_status_markdown(
     champion_row: RealBenchmarkRow | None,
     display_row: RealBenchmarkRow | None = None,
     fix_lines: list[str] | None = None,
+    ops_summary: dict[str, Any] | None = None,
 ) -> str:
     row = display_row or champion_row
     if row is None:
@@ -1175,6 +1301,9 @@ def build_next_status_markdown(
         f"- average_edge_kept: {_fmt_metric(summary['average_edge_kept'], digits=6)}",
         f"- average_edge_rejected: {_fmt_metric(summary['average_edge_rejected'], digits=6)}",
         f"- expectancy: {_fmt_metric(summary['expectancy'], digits=6)}",
+        f"- weekly_benchmark: {summary['weekly_benchmark']}",
+        f"- daily_stress_benchmark: {summary['daily_stress_benchmark']}",
+        f"- daily_stress_exact_blocker: {summary['daily_stress_exact_blocker']}",
         f"- eligibility: {summary['eligibility']}",
         f"- PASS/FAIL: {summary['PASS_FAIL']}",
         f"- result: {summary['PASS_FAIL']}",
@@ -1184,6 +1313,25 @@ def build_next_status_markdown(
         "",
         "FAIL honest if weekly < 1.0% or trade_count <= 0 or expectancy <= 0 or keep_coverage < 5%.",
     ]
+    if ops_summary:
+        lines += [
+            "",
+            "## Validation / Automation / Readiness",
+            f"- validation_result: {ops_summary['validation_result']}",
+            f"- pytest_result: {ops_summary['pytest_result']}",
+            f"- training_check_result: {ops_summary['training_check_result']}",
+            f"- ui_flow_result: {ops_summary['ui_flow_result']}",
+            f"- ui_approval_works: {ops_summary['ui_approval_works']}",
+            f"- restart_reload_works: {ops_summary['restart_reload_works']}",
+            f"- broker_readiness_result: {ops_summary['broker_readiness_result']}",
+            f"- broker_readiness_details: {ops_summary['broker_readiness_details']}",
+        ]
+    lines += [
+        "",
+        "## Exact Commands Run",
+    ]
+    for command in COLAB_COMMANDS_RUN:
+        lines.append(f"- {command}")
     if fix_lines:
         lines += [
             "",
@@ -2276,6 +2424,12 @@ def main(argv: list[str] | None = None) -> int:
             encoding="utf-8",
         )
 
+    source_pair = result_by_model.get(source_of_truth_row.model_name)
+    source_result = source_pair[1] if source_pair is not None else None
+    if xgb_pair is not None:
+        source_result = xgb_pair[1]
+    _write_source_of_truth_artifacts(source_result, rows, output_dir)
+
     (output_dir / "model_leaderboard.md").write_text(
         build_model_leaderboard_markdown(champion_row, rows),
         encoding="utf-8",
@@ -2285,7 +2439,12 @@ def main(argv: list[str] | None = None) -> int:
         encoding="utf-8",
     )
     (output_dir / "NEXT_STATUS.md").write_text(
-        build_next_status_markdown(champion_row, source_of_truth_row, fix_lines=fix_lines),
+        build_next_status_markdown(
+            champion_row,
+            source_of_truth_row,
+            fix_lines=fix_lines,
+            ops_summary=_ops_summary(output_dir),
+        ),
         encoding="utf-8",
     )
     (output_dir / "iteration_log.md").write_text(
