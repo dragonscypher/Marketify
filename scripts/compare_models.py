@@ -1177,6 +1177,61 @@ def build_next_status_markdown(
     return "\n".join(lines) + "\n"
 
 
+def build_iteration_log_markdown(
+    champion_row: RealBenchmarkRow | None,
+    source_of_truth_row: RealBenchmarkRow,
+    gate_overrides: dict[str, float] | None,
+) -> str:
+    summary = _build_benchmark_summary(champion_row, source_of_truth_row)
+    gate_overrides = gate_overrides or {}
+    exact_knob_changes = (
+        "model_disagreement_threshold="
+        f"{_fmt_metric(gate_overrides.get('max_disagreement', source_of_truth_row.selected_max_disagreement), digits=6)}; "
+        "approval_precision_threshold="
+        f"{_fmt_metric(gate_overrides.get('approval_precision_threshold', source_of_truth_row.selected_approval_precision_threshold), digits=6)}; "
+        "abstain_margin="
+        f"{_fmt_metric(gate_overrides.get('abstain_margin', 0.0), digits=6)}; "
+        f"keep_coverage_floor_guard={_fmt_metric(MIN_KEEP_COVERAGE_PCT, digits=2)}"
+    )
+    keep_rule = "KEEP" if _is_eligible_for_champion(source_of_truth_row) else "REJECT"
+    stop_reason = "deployable_champion_reached" if keep_rule == "KEEP" else "continue_gate_iteration"
+    lines = [
+        "# Iteration Log",
+        "",
+        "One honest source-of-truth row only. No architecture change. No leverage change. No exit-rule work.",
+        "",
+        "## Iteration 1",
+        "- iteration_number: 1",
+        "- phase: deployability_gate_tuning",
+        f"- source_of_truth_path: {summary['source_of_truth_path']}",
+        "- architecture: xgb primary; recurrent support/context only; news/regime/risk veto only",
+        f"- exact_knob_changes: {exact_knob_changes}",
+        f"- champion_model: {summary['champion_model']}",
+        f"- weekly_return_pct: {_fmt_metric(summary['weekly_return_pct'])}",
+        f"- daily_return_pct: {_fmt_metric(summary['daily_return_pct'])}",
+        f"- sharpe: {_fmt_metric(summary['sharpe'])}",
+        f"- max_drawdown_pct: {_fmt_metric(summary['max_drawdown_pct'])}",
+        f"- cvar_95_pct: {_fmt_metric(summary['cvar_95_pct'])}",
+        f"- trade_count: {summary['trade_count']}",
+        f"- approval_count: {summary['approval_count']}",
+        f"- keep_coverage_pct: {_fmt_metric(summary['keep_coverage_pct'], digits=2)}",
+        f"- expectancy: {_fmt_metric(summary['expectancy'], digits=6)}",
+        f"- disagreement_reject_rate: {_fmt_metric(summary['disagreement_reject_rate'], digits=2)}",
+        f"- keep_rate_by_gate: {summary['keep_rate_by_gate']}",
+        f"- keep_rate_by_disagreement_bucket: {summary['keep_rate_by_disagreement_bucket']}",
+        f"- kept_trade_count: {summary['kept_trade_count']}",
+        f"- approval_precision_top_half: {_fmt_metric(summary['approval_precision_top_half'], digits=2)}",
+        f"- approval_precision_bottom_half: {_fmt_metric(summary['approval_precision_bottom_half'], digits=2)}",
+        f"- expectancy_by_confidence_bucket: {summary['expectancy_by_confidence_bucket']}",
+        f"- pnl_by_confidence_bucket: {summary['pnl_by_confidence_bucket']}",
+        f"- PASS/FAIL: {summary['PASS_FAIL']}",
+        f"- exact_blocker: {summary['exact_blocker']}",
+        f"- keep_or_revert: {keep_rule}",
+        f"- stop_reason: {stop_reason}",
+    ]
+    return "\n".join(lines) + "\n"
+
+
 def _bucket_summary(diag: pd.DataFrame, column: str, group_name: str, bucket_count: int = 3) -> list[dict]:
     if diag.empty or column not in diag.columns:
         return []
@@ -2178,11 +2233,16 @@ def main(argv: list[str] | None = None) -> int:
         build_next_status_markdown(champion_row, source_of_truth_row, fix_lines=fix_lines),
         encoding="utf-8",
     )
+    (output_dir / "iteration_log.md").write_text(
+        build_iteration_log_markdown(champion_row, source_of_truth_row, gate_overrides),
+        encoding="utf-8",
+    )
 
     print(f"[COMPARE] leaderboard={output_dir / 'model_leaderboard.md'}")
     print(f"[COMPARE] benchmark={output_dir / 'real_benchmark.md'}")
     print(f"[COMPARE] false_positive={output_dir / 'false_positive_trade_review.md'}")
     print(f"[COMPARE] next={output_dir / 'NEXT_STATUS.md'}")
+    print(f"[COMPARE] iteration_log={output_dir / 'iteration_log.md'}")
     print(
         "[COMPARE] RESULT: "
         f"{_pass_fail_label(source_of_truth_row)} champion={champion_row.model_name if champion_row is not None else 'NONE'} "
