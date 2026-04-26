@@ -101,6 +101,13 @@ class RealBenchmarkRow:
     champion_eligible: bool = False
 
 
+@dataclass
+class TunedGateResult:
+    overrides: dict[str, float]
+    row: RealBenchmarkRow | None
+    result: dict[str, Any] | None
+
+
 def _ensure_dir(path: Path) -> Path:
     path.mkdir(parents=True, exist_ok=True)
     return path
@@ -753,7 +760,7 @@ def _tune_real_path_gate_knobs(
     xgb_preds: pd.Series,
     config,
     support_preds: dict[str, pd.Series],
-) -> dict[str, float]:
+) -> TunedGateResult:
     base_thresholds = _signal_gate_thresholds(config)
     base_min_confidence = float(base_thresholds["min_confidence"])
     base_max_disagreement = float(base_thresholds["max_disagreement"])
@@ -814,6 +821,7 @@ def _tune_real_path_gate_knobs(
     }
     best_score: tuple[float, ...] | None = None
     best_row: RealBenchmarkRow | None = None
+    best_result: dict[str, Any] | None = None
 
     for max_disagreement in max_disagreement_candidates:
         for approval_precision_threshold in approval_precision_threshold_candidates:
@@ -823,7 +831,7 @@ def _tune_real_path_gate_knobs(
                     "approval_precision_threshold": float(approval_precision_threshold),
                     "abstain_margin": float(abstain_margin),
                 }
-                trial_row, _trial_result = _run_real_lane(
+                trial_row, trial_result = _run_real_lane(
                     model_name="xgb",
                     feat=feat,
                     preds=xgb_preds,
@@ -855,6 +863,7 @@ def _tune_real_path_gate_knobs(
                     best_score = score
                     best_overrides = overrides
                     best_row = trial_row
+                    best_result = trial_result
 
     if best_row is not None:
         print(
@@ -867,7 +876,7 @@ def _tune_real_path_gate_knobs(
             f"disagreement_reject_rate={best_row.disagreement_reject_rate}% top_half_precision={best_row.approval_precision_top_half}"
         )
 
-    return best_overrides
+    return TunedGateResult(overrides=best_overrides, row=best_row, result=best_result)
 
 
 def _fmt_metric(value: object, digits: int = 4) -> str:
@@ -1024,12 +1033,12 @@ def build_model_leaderboard_markdown(
         "Real traded path only. xgb primary lane. recurrent/news/regime remain support or veto only.",
         f"current_champion: {current_champion}",
         "",
-        "| model_name | role | weekly_return_pct | sharpe | max_drawdown_pct | trade_count | approval_count | keep_coverage_pct | selected_max_disagreement | applied_max_disagreement | selected_approval_precision_threshold | applied_approval_precision_threshold | gate_config_match | final_expectancy | rejected_by_disagreement_count | disagreement_reject_rate | keep_rate_by_disagreement_bucket | approval_precision_top_half | approval_precision_bottom_half | expectancy_by_confidence_bucket | pnl_by_confidence_bucket | PASS/FAIL | exact_blocker | notes |",
-        "| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- | ---: | ---: | ---: | --- | ---: | ---: | --- | --- | --- | --- | --- |",
+        "| model_name | role | weekly_return_pct | sharpe | max_drawdown_pct | trade_count | approval_count | keep_coverage_pct | selected_max_disagreement | applied_max_disagreement | selected_approval_precision_threshold | applied_approval_precision_threshold | gate_config_match | final_trade_count | final_approval_count | final_keep_coverage_pct | final_expectancy | rejected_by_disagreement_count | disagreement_reject_rate | keep_rate_by_disagreement_bucket | approval_precision_top_half | approval_precision_bottom_half | expectancy_by_confidence_bucket | pnl_by_confidence_bucket | PASS/FAIL | exact_blocker | notes |",
+        "| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- | ---: | ---: | ---: | ---: | ---: | ---: | --- | ---: | ---: | --- | --- | --- | --- | --- |",
     ]
     for record in _build_model_compare_records(rows):
         lines.append(
-            f"| {record['model_name']} | {record['role']} | {_fmt_metric(record['weekly_return_pct'])} | {_fmt_metric(record['sharpe'])} | {_fmt_metric(record['max_drawdown_pct'])} | {record['trade_count']} | {record['approval_count']} | {_fmt_metric(record['keep_coverage_pct'], digits=2)} | {_fmt_metric(record['selected_max_disagreement'], digits=6)} | {_fmt_metric(record['applied_max_disagreement'], digits=6)} | {_fmt_metric(record['selected_approval_precision_threshold'], digits=6)} | {_fmt_metric(record['applied_approval_precision_threshold'], digits=6)} | {record['gate_config_match']} | {_fmt_metric(record['final_expectancy'], digits=6)} | {record['rejected_by_disagreement_count']} | {_fmt_metric(record['disagreement_reject_rate'], digits=2)} | {record['keep_rate_by_disagreement_bucket']} | {_fmt_metric(record['approval_precision_top_half'], digits=2)} | {_fmt_metric(record['approval_precision_bottom_half'], digits=2)} | {record['expectancy_by_confidence_bucket']} | {record['pnl_by_confidence_bucket']} | {record['PASS_FAIL']} | {record['exact_blocker']} | {record['notes']} |"
+            f"| {record['model_name']} | {record['role']} | {_fmt_metric(record['weekly_return_pct'])} | {_fmt_metric(record['sharpe'])} | {_fmt_metric(record['max_drawdown_pct'])} | {record['trade_count']} | {record['approval_count']} | {_fmt_metric(record['keep_coverage_pct'], digits=2)} | {_fmt_metric(record['selected_max_disagreement'], digits=6)} | {_fmt_metric(record['applied_max_disagreement'], digits=6)} | {_fmt_metric(record['selected_approval_precision_threshold'], digits=6)} | {_fmt_metric(record['applied_approval_precision_threshold'], digits=6)} | {record['gate_config_match']} | {record['final_trade_count']} | {record['final_approval_count']} | {_fmt_metric(record['final_keep_coverage_pct'], digits=2)} | {_fmt_metric(record['final_expectancy'], digits=6)} | {record['rejected_by_disagreement_count']} | {_fmt_metric(record['disagreement_reject_rate'], digits=2)} | {record['keep_rate_by_disagreement_bucket']} | {_fmt_metric(record['approval_precision_top_half'], digits=2)} | {_fmt_metric(record['approval_precision_bottom_half'], digits=2)} | {record['expectancy_by_confidence_bucket']} | {record['pnl_by_confidence_bucket']} | {record['PASS_FAIL']} | {record['exact_blocker']} | {record['notes']} |"
         )
     lines += [
         "",
@@ -2030,13 +2039,15 @@ def main(argv: list[str] | None = None) -> int:
         rows.append(_failed_model_row("fusion_reference_only", "same-path candidate failed: requires xgb + gru predictions"))
 
     gate_overrides: dict[str, float] | None = None
+    tuned_gate_result: TunedGateResult | None = None
     if "xgb" in prediction_rows:
-        gate_overrides = _tune_real_path_gate_knobs(
+        tuned_gate_result = _tune_real_path_gate_knobs(
             feat,
             prediction_rows["xgb"],
             config,
             _support_comparison_preds("xgb", prediction_rows),
         )
+        gate_overrides = tuned_gate_result.overrides
 
     for model_name, preds in prediction_rows.items():
         comparison_preds = _support_comparison_preds(model_name, prediction_rows)
@@ -2048,16 +2059,21 @@ def main(argv: list[str] | None = None) -> int:
             "lstm": "support/context comparator; may inform disagreement only",
             "fusion_reference_only": "reference only; never champion until deployable same-path semantics proven",
         }[model_name]
-        row, _result = _run_real_lane(
-            model_name=model_name,
-            feat=feat,
-            preds=preds,
-            config=config,
-            role=role,
-            comparison_preds=comparison_preds,
-            gate_overrides=gate_overrides,
-            notes=notes,
-        )
+        if model_name == "xgb" and tuned_gate_result is not None and tuned_gate_result.row is not None and tuned_gate_result.result is not None:
+            row, _result = tuned_gate_result.row, tuned_gate_result.result
+            row.notes = notes
+            print("[COMPARE] using tuned xgb gate run as final source_of_truth row")
+        else:
+            row, _result = _run_real_lane(
+                model_name=model_name,
+                feat=feat,
+                preds=preds,
+                config=config,
+                role=role,
+                comparison_preds=comparison_preds,
+                gate_overrides=gate_overrides,
+                notes=notes,
+            )
         rows.append(row)
         result_by_model[model_name] = (row, _result)
 
