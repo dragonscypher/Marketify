@@ -43,6 +43,152 @@ def _config_hash(config_payload: dict[str, Any]) -> str:
     return hashlib.sha256(blob).hexdigest()[:12]
 
 
+def _rel(path: Path) -> str:
+    try:
+        return str(path.resolve().relative_to(ROOT.resolve())).replace("\\", "/")
+    except ValueError:
+        return str(path).replace("\\", "/")
+
+
+def _sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as f:
+        for chunk in iter(lambda: f.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _probe_pickle_load(path: Path) -> tuple[bool, str]:
+    try:
+        with path.open("rb") as f:
+            model = pickle.load(f)
+        return True, type(model).__name__
+    except Exception as exc:
+        return False, f"LOAD_ERROR: {exc}"
+
+
+def _model_manifest(model_name: str, ticker: str, latest_path: Path, static_path: Path) -> dict[str, Any]:
+    loaded, model_class = _probe_pickle_load(latest_path)
+    return {
+        "model": model_name,
+        "ticker": ticker,
+        "artifact_path": _rel(latest_path),
+        "latest_artifact_path": _rel(latest_path),
+        "static_artifact_path": _rel(static_path),
+        "exists": latest_path.exists(),
+        "size_bytes": latest_path.stat().st_size if latest_path.exists() else 0,
+        "sha256": _sha256(latest_path) if latest_path.exists() else "MISSING",
+        "pickle_load": "YES" if loaded else "NO",
+        "model_class": model_class,
+    }
+
+
+def _write_artifact_reports(
+    *,
+    config,
+    cfg_hash: str,
+    artifact_timestamp: str,
+    artifact_run_dir: Path,
+    expected_static: list[Path],
+    leaderboard: list[dict[str, Any]],
+) -> dict[str, Any]:
+    ticker = config.data.ticker
+    latest_xgb = artifact_run_dir / f"xgb_{ticker}.pkl"
+    latest_ridge = artifact_run_dir / f"ridge_{ticker}.pkl"
+    static_by_name = {path.stem.split("_", 1)[0]: path for path in expected_static}
+    models = {
+        "xgb": _model_manifest("xgb", ticker, latest_xgb, static_by_name["xgb"]),
+        "ridge": _model_manifest("ridge", ticker, latest_ridge, static_by_name["ridge"]),
+    }
+    local_artifact_present = all(row["exists"] for row in models.values())
+    local_model_load = models["xgb"]["pickle_load"] == "YES"
+    pointer = {
+        "ticker": ticker,
+        "artifact_timestamp": artifact_timestamp,
+        "config_hash": cfg_hash,
+        "artifact_run_dir": _rel(artifact_run_dir),
+        "latest_xgb_artifact_path": _rel(latest_xgb),
+        "latest_ridge_artifact_path": _rel(latest_ridge),
+        "static_xgb_artifact_path": _rel(static_by_name["xgb"]),
+        "static_ridge_artifact_path": _rel(static_by_name["ridge"]),
+        "models": models,
+    }
+    pointer_path = ARTIFACTS_DIR / f"latest_{ticker}.json"
+    pointer_path.write_text(json.dumps(pointer, indent=2), encoding="utf-8")
+
+    manifest = {
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "ticker": ticker,
+        "artifact_timestamp": artifact_timestamp,
+        "config_hash": cfg_hash,
+        "artifact_run_dir": _rel(artifact_run_dir),
+        "latest_artifact_pointer_path": _rel(pointer_path),
+        "latest_xgb_artifact_path": _rel(latest_xgb),
+        "latest_ridge_artifact_path": _rel(latest_ridge),
+        "static_xgb_artifact_path": _rel(static_by_name["xgb"]),
+        "static_ridge_artifact_path": _rel(static_by_name["ridge"]),
+        "local_artifact_present": "YES" if local_artifact_present else "NO",
+        "local_model_load": "YES" if local_model_load else "NO",
+        "models": models,
+        "leaderboard": leaderboard,
+        "export_download_instructions": [
+            f"Copy {_rel(pointer_path)} from Colab artifacts directory to same relative path in local repo.",
+            f"Copy {_rel(latest_xgb)} and {_rel(latest_ridge)} from Colab to same relative paths in local repo.",
+            f"Alternative: copy static artifacts/xgb_{ticker}.pkl and artifacts/ridge_{ticker}.pkl into local artifacts/.",
+            "After sync, run: python scripts/local_run_readiness.py --browser-opened YES --browser-note \"local app opened; click proof unavailable\".",
+        ],
+    }
+
+    manifest_json = REPORTS_DIR / "artifact_manifest.json"
+    manifest_md = REPORTS_DIR / "artifact_manifest.md"
+    sync_md = REPORTS_DIR / "local_model_sync.md"
+    manifest_json.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
+
+    lines = [
+        "# Artifact Manifest",
+        "",
+        f"latest_xgb_artifact_path: {manifest['latest_xgb_artifact_path']}",
+        f"latest_ridge_artifact_path: {manifest['latest_ridge_artifact_path']}",
+        f"artifact_timestamp: {artifact_timestamp}",
+        f"config_hash: {cfg_hash}",
+        f"local_artifact_present: {manifest['local_artifact_present']}",
+        f"local_model_load: {manifest['local_model_load']}",
+        f"latest_artifact_pointer_path: {manifest['latest_artifact_pointer_path']}",
+        "",
+        "## Checksums",
+        "| model | path | size_bytes | sha256 | pickle_load | model_class |",
+        "| --- | --- | ---: | --- | --- | --- |",
+    ]
+    for name, row in models.items():
+        lines.append(
+            f"| {name} | {row['artifact_path']} | {row['size_bytes']} | {row['sha256']} | {row['pickle_load']} | {row['model_class']} |"
+        )
+    lines += [
+        "",
+        "## Export / Download Instructions",
+    ]
+    lines.extend(f"- {item}" for item in manifest["export_download_instructions"])
+    manifest_md.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+    sync_lines = [
+        "# Local Model Sync",
+        "",
+        f"latest_xgb_artifact_path: {manifest['latest_xgb_artifact_path']}",
+        f"latest_ridge_artifact_path: {manifest['latest_ridge_artifact_path']}",
+        f"artifact_timestamp: {artifact_timestamp}",
+        f"config_hash: {cfg_hash}",
+        f"local_artifact_present: {manifest['local_artifact_present']}",
+        f"local_model_load: {manifest['local_model_load']}",
+        "sync_source: current runtime artifacts",
+        "sync_status: READY_TO_COPY",
+        "",
+        "## Instructions",
+    ]
+    sync_lines.extend(f"- {item}" for item in manifest["export_download_instructions"])
+    sync_md.write_text("\n".join(sync_lines) + "\n", encoding="utf-8")
+    return manifest
+
+
 def _equity_history(equity: pd.Series) -> list[dict[str, str | float]]:
     clean = pd.to_numeric(equity, errors="coerce").dropna()
     return [{"ts": str(ts), "equity": float(value)} for ts, value in clean.items()]
@@ -151,6 +297,11 @@ def _write_markdown(summary: dict[str, Any], path: Path) -> None:
         "paper_only_default: YES",
         "live_trading_enabled: NO",
         "profit_guarantee: NO",
+        f"latest_xgb_artifact_path: {summary['artifact_manifest']['latest_xgb_artifact_path']}",
+        f"latest_ridge_artifact_path: {summary['artifact_manifest']['latest_ridge_artifact_path']}",
+        f"artifact_timestamp: {summary['artifact_manifest']['artifact_timestamp']}",
+        f"local_artifact_present: {summary['artifact_manifest']['local_artifact_present']}",
+        f"local_model_load: {summary['artifact_manifest']['local_model_load']}",
         "",
         "## Model Metrics",
         "| model | role | weekly_return_pct | daily_return_pct | sharpe | sortino | max_drawdown_pct | calmar | win_rate_pct | trade_count | turnover | cvar_5_pct | weeks_ge_1pct | days_ge_1pct | PASS_WEEKLY | PASS_DAILY | daily_stress_blocker |",
@@ -199,8 +350,19 @@ def main(argv: list[str] | None = None) -> int:
         raise RuntimeError(f"missing artifacts after train_if_missing: {missing_after}")
     for path in expected_static:
         shutil.copy2(path, artifact_run_dir / path.name)
+    leaderboard_path = ARTIFACT_DIR / f"leaderboard_{config.data.ticker}.json"
+    if leaderboard_path.exists():
+        shutil.copy2(leaderboard_path, artifact_run_dir / leaderboard_path.name)
     (artifact_run_dir / "config.json").write_text(json.dumps(config_payload, indent=2), encoding="utf-8")
     (artifact_run_dir / "train_if_missing_leaderboard.json").write_text(json.dumps(leaderboard, indent=2), encoding="utf-8")
+    artifact_manifest = _write_artifact_reports(
+        config=config,
+        cfg_hash=cfg_hash,
+        artifact_timestamp=timestamp,
+        artifact_run_dir=artifact_run_dir,
+        expected_static=expected_static,
+        leaderboard=leaderboard,
+    )
 
     raw = fetch_market_data(
         ticker=config.data.ticker,
@@ -227,6 +389,7 @@ def main(argv: list[str] | None = None) -> int:
         "train_if_missing_behavior": "trained_missing_artifacts" if missing_before or args.force else "loaded_existing_artifacts",
         "missing_before": missing_before,
         "static_artifacts": [str(path) for path in expected_static],
+        "artifact_manifest": artifact_manifest,
         "metrics": metrics,
         "recurrent_status": recurrent_status,
     }
@@ -239,6 +402,7 @@ def main(argv: list[str] | None = None) -> int:
     print(f"[TRAIN_CHECK] json={json_path}")
     print(f"[TRAIN_CHECK] markdown={md_path}")
     print(f"[TRAIN_CHECK] artifact_run_dir={artifact_run_dir}")
+    print(f"[TRAIN_CHECK] artifact_manifest={REPORTS_DIR / 'artifact_manifest.json'}")
     return 0 if summary["training_check_result"] == "PASS" else 1
 
 

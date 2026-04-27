@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import json
+import pickle
 from pathlib import Path
+from typing import Any
 
 import gradio as gr
 import pandas as pd
@@ -14,13 +17,113 @@ from marketify.features.technical import (TECHNICAL_FEATURE_COLUMNS,
                                           add_technical_features)
 from marketify.models.ensemble import (TradeIdeaInput, build_trade_idea,
                                        compute_cvar_95)
-from marketify.models.xgb_model import rolling_train_predict
 from marketify.onboarding import (apply_user_config, load_user_config,
                                   save_user_config)
 from marketify.risk.risk_engine import RiskEngine
 from marketify.state.store import InMemoryStore
 
 REPORTS_DIR = Path("reports")
+ARTIFACT_DIR = Path("artifacts")
+
+
+def _read_json(path: Path) -> dict[str, Any]:
+    try:
+        return json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
+    except Exception:
+        return {}
+
+
+def _resolve_artifact_ref(path_value: Any) -> Path | None:
+    if not isinstance(path_value, str) or not path_value.strip():
+        return None
+    raw_path = Path(path_value.strip())
+    parts = list(raw_path.parts)
+    if "artifacts" in parts:
+        raw_path = Path(*parts[parts.index("artifacts"):])
+    if raw_path.is_absolute():
+        return raw_path
+    return raw_path
+
+
+def _manifest_artifact_candidates(ticker: str, model_name: str) -> list[Path]:
+    ticker = ticker.upper().strip()
+    docs = [
+        _read_json(ARTIFACT_DIR / f"latest_{ticker}.json"),
+        _read_json(REPORTS_DIR / "artifact_manifest.json"),
+    ]
+    candidates: list[Path] = []
+    for doc in docs:
+        if not doc:
+            continue
+        model_doc = doc.get("models", {}).get(model_name, {}) if isinstance(doc.get("models"), dict) else {}
+        refs = [
+            doc.get(f"latest_{model_name}_artifact_path"),
+            doc.get(f"static_{model_name}_artifact_path"),
+            model_doc.get("artifact_path") if isinstance(model_doc, dict) else None,
+            model_doc.get("latest_artifact_path") if isinstance(model_doc, dict) else None,
+            model_doc.get("static_artifact_path") if isinstance(model_doc, dict) else None,
+        ]
+        for ref in refs:
+            path = _resolve_artifact_ref(ref)
+            if path is not None:
+                candidates.append(path)
+    return candidates
+
+
+def _find_latest_artifact(ticker: str, model_name: str = "xgb") -> Path | None:
+    ticker = ticker.upper().strip()
+    candidates = [
+        *_manifest_artifact_candidates(ticker, model_name),
+        ARTIFACT_DIR / f"{model_name}_{ticker}.pkl",
+        *ARTIFACT_DIR.glob(f"training_runs/*/{model_name}_{ticker}.pkl"),
+    ]
+    existing = list(dict.fromkeys(path for path in candidates if path.exists()))
+    if not existing:
+        return None
+    return max(existing, key=lambda path: path.stat().st_mtime)
+
+
+def _load_local_model_artifact(ticker: str) -> tuple[Any | None, dict[str, Any]]:
+    artifact_path = _find_latest_artifact(ticker, "xgb")
+    if artifact_path is None:
+        return None, {
+            "LOCAL_MODEL_LOAD": "NO",
+            "loaded_artifact_path": "MISSING",
+            "loaded_model_type": "MISSING",
+            "inference_smoke": "FAIL",
+            "message": "model missing, run training or sync artifacts",
+        }
+    try:
+        with artifact_path.open("rb") as f:
+            model = pickle.load(f)
+        return model, {
+            "LOCAL_MODEL_LOAD": "YES",
+            "loaded_artifact_path": str(artifact_path),
+            "loaded_model_type": "xgb",
+            "loaded_model_class": type(model).__name__,
+            "inference_smoke": "PENDING",
+            "message": "trained artifact loaded locally",
+        }
+    except Exception as exc:
+        return None, {
+            "LOCAL_MODEL_LOAD": "NO",
+            "loaded_artifact_path": str(artifact_path),
+            "loaded_model_type": "LOAD_ERROR",
+            "inference_smoke": "FAIL",
+            "message": f"model load failed: {exc}",
+        }
+
+
+def _predict_with_local_model(model: Any, feat: pd.DataFrame) -> tuple[float | None, dict[str, Any]]:
+    feature_cols = [col for col in TECHNICAL_FEATURE_COLUMNS if col in feat.columns]
+    if not feature_cols:
+        return None, {"inference_smoke": "FAIL", "message": "no technical feature columns available"}
+    try:
+        latest_x = feat[feature_cols].tail(1).to_numpy()
+        pred = float(model.predict(latest_x)[0])
+        return pred, {"inference_smoke": "PASS", "feature_count": len(feature_cols)}
+    except Exception as exc:
+        return None, {"inference_smoke": "FAIL", "message": f"inference failed: {exc}"}
 
 
 def bootstrap() -> dict:
@@ -33,6 +136,13 @@ def bootstrap() -> dict:
         "news": NewsProvider(),
         "sentiment": FinBERTSentiment(enabled=False),
         "last_price": None,
+        "model_status": {
+            "LOCAL_MODEL_LOAD": "UNKNOWN",
+            "loaded_artifact_path": "not checked yet",
+            "loaded_model_type": "UNKNOWN",
+            "inference_smoke": "UNKNOWN",
+            "message": "Generate suggestion checks local trained artifact.",
+        },
     }
 
 
@@ -72,6 +182,45 @@ def _frames(state: dict | None) -> tuple[dict, pd.DataFrame, pd.DataFrame, pd.Da
     positions = pd.DataFrame(broker.get_positions())
     orders = pd.DataFrame(broker.get_orders())
     return state, account, positions, orders
+
+
+def _pnl_frame(state: dict | None) -> pd.DataFrame:
+    state = _ensure_state(state)
+    account = state["broker"].get_account()
+    return pd.DataFrame(
+        [
+            {
+                "equity": account.get("equity", 0.0),
+                "cash": account.get("cash", 0.0),
+                "realized_pnl": account.get("realized_pnl", 0.0),
+                "unrealized_pnl": account.get("unrealized_pnl", 0.0),
+                "drawdown_pct": account.get("drawdown_pct", 0.0),
+                "daily_loss_pct": account.get("daily_loss_pct", 0.0),
+            }
+        ]
+    )
+
+
+def _model_status_text(state: dict | None) -> str:
+    state = _ensure_state(state)
+    status = state.get("model_status", {})
+    return (
+        f"LOCAL_MODEL_LOAD={status.get('LOCAL_MODEL_LOAD', 'UNKNOWN')}; "
+        f"loaded_artifact_path={status.get('loaded_artifact_path', 'MISSING')}; "
+        f"loaded_model_type={status.get('loaded_model_type', 'MISSING')}; "
+        f"inference_smoke={status.get('inference_smoke', 'UNKNOWN')}; "
+        f"message={status.get('message', '')}"
+    )
+
+
+def _safety_status_text(state: dict | None) -> str:
+    state = _ensure_state(state)
+    mode = state["config"].trading_mode
+    return (
+        f"paper_only_default={'YES' if mode == 'paper' else 'NO'}; "
+        "live_order_path_enabled=NO; approval_required=YES; "
+        f"engine_status={_engine_status(state)}"
+    )
 
 
 def _fills_frame(state: dict | None) -> pd.DataFrame:
@@ -167,18 +316,38 @@ def generate_trade_suggestion(state: dict | None, ticker: str, interval: str, pe
     config.data.period = period
     config.data.prepost = bool(prepost)
 
+    model, model_status = _load_local_model_artifact(ticker)
+    state["model_status"] = model_status
+    if model is None:
+        state["store"].clear_pending()
+        state, account, positions, orders = _frames(state)
+        return (
+            state,
+            f"[{_engine_status(state)}] {model_status['message']}. No local order path touched.",
+            _idea_frame(state),
+            account,
+            positions,
+            orders,
+        )
+
     raw = fetch_market_data(ticker=ticker, interval=interval, period=period, prepost=prepost)
     feat = add_technical_features(raw)
-    preds = rolling_train_predict(
-        frame=feat,
-        feature_cols=TECHNICAL_FEATURE_COLUMNS,
-        target_col="target_next_ret",
-        config=config.model,
-    )
+    latest_pred, inference_status = _predict_with_local_model(model, feat)
+    state["model_status"] = {**model_status, **inference_status}
+    if latest_pred is None:
+        state["store"].clear_pending()
+        state, account, positions, orders = _frames(state)
+        return (
+            state,
+            f"[{_engine_status(state)}] {state['model_status']['message']}. No local order path touched.",
+            _idea_frame(state),
+            account,
+            positions,
+            orders,
+        )
 
-    latest_ts = preds.dropna().index[-1]
+    latest_ts = feat.index[-1]
     latest_row = feat.loc[latest_ts]
-    latest_pred = float(preds.loc[latest_ts])
     last_price = float(latest_row["Close"])
     state["last_price"] = last_price
 
@@ -413,9 +582,12 @@ def refresh_dashboard(state: dict | None):
         positions,
         orders,
         _fills_frame(state),
+        _pnl_frame(state),
         _risk_events_frame(state),
         _model_leaderboard_frame(),
         _benchmark_status_text(),
+        _model_status_text(state),
+        _safety_status_text(state),
     )
 
 
@@ -546,9 +718,12 @@ with gr.Blocks(title="Marketify Paper Engine") as demo:
             positions = gr.Dataframe(label="Positions", interactive=False)
             orders = gr.Dataframe(label="Open Orders / Orders", interactive=False)
             fills = gr.Dataframe(label="Fills", interactive=False)
+            pnl_summary = gr.Dataframe(label="PnL Summary", interactive=False)
             risk_events = gr.Dataframe(label="Risk Events", interactive=False)
             model_leaderboard = gr.Dataframe(label="Model Leaderboard", interactive=False)
             benchmark_status = gr.Textbox(label="Benchmark Status (weekly core / daily stress)", interactive=False)
+            local_model_status = gr.Textbox(label="Local Model Status", interactive=False)
+            safety_status = gr.Textbox(label="Safety Status", interactive=False)
 
             with gr.Row():
                 refresh_dashboard_btn = gr.Button("Refresh Dashboard")
@@ -602,13 +777,39 @@ with gr.Blocks(title="Marketify Paper Engine") as demo:
             refresh_dashboard_btn.click(
                 refresh_dashboard,
                 inputs=[app_state],
-                outputs=[app_state, suggestion, account, positions, orders, fills, risk_events, model_leaderboard, benchmark_status],
+                outputs=[
+                    app_state,
+                    suggestion,
+                    account,
+                    positions,
+                    orders,
+                    fills,
+                    pnl_summary,
+                    risk_events,
+                    model_leaderboard,
+                    benchmark_status,
+                    local_model_status,
+                    safety_status,
+                ],
             )
 
     demo.load(
         refresh_dashboard,
         inputs=[app_state],
-        outputs=[app_state, suggestion, account, positions, orders, fills, risk_events, model_leaderboard, benchmark_status],
+        outputs=[
+            app_state,
+            suggestion,
+            account,
+            positions,
+            orders,
+            fills,
+            pnl_summary,
+            risk_events,
+            model_leaderboard,
+            benchmark_status,
+            local_model_status,
+            safety_status,
+        ],
     )
 
 

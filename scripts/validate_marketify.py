@@ -152,7 +152,18 @@ def run_gradio_launch_smoke() -> dict[str, Any]:
     if not isinstance(demo, gr.Blocks):
         return _fail("gradio_launch_smoke", "app.demo is not gradio.Blocks")
     labels = [getattr(block, "label", "") for block in demo.blocks.values()]
-    required = ["Account", "Positions", "Open Orders / Orders", "Fills", "Risk Events", "Model Leaderboard"]
+    required = [
+        "Account",
+        "Positions",
+        "Open Orders / Orders",
+        "Fills",
+        "PnL Summary",
+        "Risk Events",
+        "Model Leaderboard",
+        "Benchmark Status (weekly core / daily stress)",
+        "Local Model Status",
+        "Safety Status",
+    ]
     missing = [label for label in required if label not in labels]
     if missing:
         return _fail("gradio_launch_smoke", "missing UI labels", missing=missing)
@@ -176,13 +187,29 @@ def _patch_app_data_for_ui(app_module):
         feat[col] = 0.001
     feat["vol_20"] = 0.01
     feat["target_next_ret"] = 0.001
-    preds = pd.Series(np.nan, index=idx)
-    preds.iloc[-1] = 0.002
+    class ScriptedModel:
+        def predict(self, x_pred):
+            return np.full(len(x_pred), 0.002)
 
-    originals = (app_module.fetch_market_data, app_module.add_technical_features, app_module.rolling_train_predict)
+    originals = (
+        app_module.fetch_market_data,
+        app_module.add_technical_features,
+        app_module._load_local_model_artifact,
+        app_module._predict_with_local_model,
+    )
     app_module.fetch_market_data = lambda **_: raw
     app_module.add_technical_features = lambda _: feat
-    app_module.rolling_train_predict = lambda **_: preds
+    app_module._load_local_model_artifact = lambda _: (
+        ScriptedModel(),
+        {
+            "LOCAL_MODEL_LOAD": "YES",
+            "loaded_artifact_path": "SCRIPTED_UI_PROOF",
+            "loaded_model_type": "ScriptedModel",
+            "inference_smoke": "PENDING",
+            "message": "scripted UI proof model",
+        },
+    )
+    app_module._predict_with_local_model = lambda model, frame: (float(model.predict(frame.tail(1))[0]), {"inference_smoke": "PASS", "feature_count": len(app_module.TECHNICAL_FEATURE_COLUMNS)})
     return originals
 
 
@@ -270,7 +297,7 @@ def run_scripted_ui_flow_proof() -> dict[str, Any]:
                 lambda: MockBrokerHTTPClient(server.base_url),
             )
     finally:
-        app.fetch_market_data, app.add_technical_features, app.rolling_train_predict = originals
+        app.fetch_market_data, app.add_technical_features, app._load_local_model_artifact, app._predict_with_local_model = originals
         if server is not None:
             server.shutdown()
 

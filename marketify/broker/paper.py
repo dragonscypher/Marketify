@@ -96,6 +96,15 @@ class PaperBroker(BrokerBase):
             )
             self.conn.execute(
                 """
+                CREATE TABLE IF NOT EXISTS market_prices (
+                    symbol TEXT PRIMARY KEY,
+                    price REAL NOT NULL,
+                    updated_at TEXT NOT NULL
+                )
+                """
+            )
+            self.conn.execute(
+                """
                 CREATE TABLE IF NOT EXISTS audit_log (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     ts TEXT NOT NULL,
@@ -127,10 +136,22 @@ class PaperBroker(BrokerBase):
                     "INSERT INTO account(id, cash, realized_pnl, max_equity, updated_at) VALUES (1, ?, 0.0, ?, ?)",
                     (self.config.initial_cash, self.config.initial_cash, _utc_now()),
                 )
+            rows = self.conn.execute("SELECT symbol, price FROM market_prices").fetchall()
+            self.market_prices = {str(row["symbol"]): float(row["price"]) for row in rows}
 
     def update_market_price(self, symbol: str, price: float) -> None:
-        self.market_prices[symbol] = float(price)
-        self.record_equity_snapshot()
+        with self.lock:
+            self.market_prices[symbol] = float(price)
+            self.conn.execute(
+                """
+                INSERT INTO market_prices(symbol, price, updated_at)
+                VALUES (?, ?, ?)
+                ON CONFLICT(symbol) DO UPDATE SET price=excluded.price, updated_at=excluded.updated_at
+                """,
+                (symbol, float(price), _utc_now()),
+            )
+            self.conn.commit()
+            self.record_equity_snapshot()
 
     def _position_row(self, symbol: str) -> sqlite3.Row | None:
         return self.conn.execute("SELECT symbol, qty, avg_cost FROM positions WHERE symbol=?", (symbol,)).fetchone()
@@ -453,5 +474,6 @@ class PaperBroker(BrokerBase):
             self.conn.execute("DELETE FROM orders")
             self.conn.execute("DELETE FROM fills")
             self.conn.execute("DELETE FROM equity_history")
+            self.conn.execute("DELETE FROM market_prices")
             self.conn.commit()
             self.market_prices.clear()
