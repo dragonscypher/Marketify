@@ -72,12 +72,15 @@ def _manifest_artifact_candidates(ticker: str, model_name: str) -> list[Path]:
 
 def _find_latest_artifact(ticker: str, model_name: str = "xgb") -> Path | None:
     ticker = ticker.upper().strip()
-    candidates = [
-        *_manifest_artifact_candidates(ticker, model_name),
+    manifest_candidates = _manifest_artifact_candidates(ticker, model_name)
+    manifest_existing = list(dict.fromkeys(path for path in manifest_candidates if path.exists()))
+    if manifest_existing:
+        return manifest_existing[0]
+    fallback_candidates = [
         ARTIFACT_DIR / f"{model_name}_{ticker}.pkl",
         *ARTIFACT_DIR.glob(f"training_runs/*/{model_name}_{ticker}.pkl"),
     ]
-    existing = list(dict.fromkeys(path for path in candidates if path.exists()))
+    existing = list(dict.fromkeys(path for path in fallback_candidates if path.exists()))
     if not existing:
         return None
     return max(existing, key=lambda path: path.stat().st_mtime)
