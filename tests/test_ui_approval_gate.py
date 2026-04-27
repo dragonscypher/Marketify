@@ -39,12 +39,27 @@ def test_generate_suggestion_does_not_submit_trade_before_approval(tmp_path, mon
     feat["vol_20"] = 0.01
     feat["target_next_ret"] = 0.001
 
-    preds = pd.Series(np.nan, index=idx)
-    preds.iloc[-1] = 0.002
+    class ScriptedModel:
+        def predict(self, x_pred):
+            return np.full(len(x_pred), 0.002)
 
     monkeypatch.setattr(app, "fetch_market_data", lambda **_: raw)
     monkeypatch.setattr(app, "add_technical_features", lambda _: feat)
-    monkeypatch.setattr(app, "rolling_train_predict", lambda **_: preds)
+    monkeypatch.setattr(
+        app,
+        "_load_local_model_artifact",
+        lambda _: (
+            ScriptedModel(),
+            {
+                "LOCAL_MODEL_LOAD": "YES",
+                "loaded_artifact_path": "SCRIPTED_TEST",
+                "loaded_model_type": "xgb",
+                "inference_smoke": "PENDING",
+                "message": "scripted test model",
+            },
+        ),
+    )
+    monkeypatch.setattr(app, "_predict_with_local_model", lambda model, frame: (float(model.predict(frame.tail(1))[0]), {"inference_smoke": "PASS"}))
 
     state, *_ = app.generate_trade_suggestion(state, "AAPL", "5m", "60d", False)
 

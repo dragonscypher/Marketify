@@ -6,6 +6,7 @@ def test_app_local_model_missing_fallback(monkeypatch, tmp_path):
     import app
 
     monkeypatch.setattr(app, "ARTIFACT_DIR", tmp_path / "artifacts")
+    monkeypatch.setattr(app, "REPORTS_DIR", tmp_path / "reports")
     model, status = app._load_local_model_artifact("AAPL")
 
     assert model is None

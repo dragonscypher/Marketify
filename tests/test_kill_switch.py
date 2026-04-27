@@ -38,11 +38,27 @@ def _patch_data(monkeypatch):
         feat[col] = 0.001
     feat["vol_20"] = 0.01
     feat["target_next_ret"] = 0.001
-    preds = pd.Series(np.nan, index=idx)
-    preds.iloc[-1] = 0.002
+    class ScriptedModel:
+        def predict(self, x_pred):
+            return np.full(len(x_pred), 0.002)
+
     monkeypatch.setattr(app, "fetch_market_data", lambda **_: raw)
     monkeypatch.setattr(app, "add_technical_features", lambda _: feat)
-    monkeypatch.setattr(app, "rolling_train_predict", lambda **_: preds)
+    monkeypatch.setattr(
+        app,
+        "_load_local_model_artifact",
+        lambda _: (
+            ScriptedModel(),
+            {
+                "LOCAL_MODEL_LOAD": "YES",
+                "loaded_artifact_path": "SCRIPTED_TEST",
+                "loaded_model_type": "xgb",
+                "inference_smoke": "PENDING",
+                "message": "scripted test model",
+            },
+        ),
+    )
+    monkeypatch.setattr(app, "_predict_with_local_model", lambda model, frame: (float(model.predict(frame.tail(1))[0]), {"inference_smoke": "PASS"}))
 
 
 def test_kill_switch_blocks_suggestion(tmp_path, monkeypatch):
