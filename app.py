@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import pickle
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import gradio as gr
 import pandas as pd
@@ -127,6 +127,16 @@ def _predict_with_local_model(model: Any, feat: pd.DataFrame) -> tuple[float | N
         return pred, {"inference_smoke": "PASS", "feature_count": len(feature_cols)}
     except Exception as exc:
         return None, {"inference_smoke": "FAIL", "message": f"inference failed: {exc}"}
+
+
+def _latest_row_scalar(row: pd.Series | pd.DataFrame, column: str) -> float:
+    value = row[column]
+    if isinstance(value, pd.DataFrame):
+        value = value.iloc[-1, 0]
+    elif isinstance(value, pd.Series):
+        clean = pd.to_numeric(value, errors="coerce").dropna()
+        value = clean.iloc[-1] if not clean.empty else value.iloc[-1]
+    return float(cast(Any, value))
 
 
 def bootstrap() -> dict:
@@ -351,7 +361,7 @@ def generate_trade_suggestion(state: dict | None, ticker: str, interval: str, pe
 
     latest_ts = feat.index[-1]
     latest_row = feat.loc[latest_ts]
-    last_price = float(latest_row["Close"])
+    last_price = _latest_row_scalar(latest_row, "Close")
     state["last_price"] = last_price
 
     broker = state["broker"]
@@ -368,7 +378,7 @@ def generate_trade_suggestion(state: dict | None, ticker: str, interval: str, pe
             last_price=last_price,
             prediction=latest_pred,
             sentiment_score=sentiment.score,
-            volatility=float(latest_row["vol_20"]),
+            volatility=_latest_row_scalar(latest_row, "vol_20"),
             news_risk=float(news["news_risk"]),
         ),
         equity=broker.get_account()["equity"],
