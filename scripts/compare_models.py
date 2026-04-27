@@ -1212,7 +1212,9 @@ COLAB_COMMANDS_RUN = [
     "python scripts/train_and_check.py",
     "python scripts/compare_models.py",
     "cat reports/validation_summary.md",
+    "cat reports/broker_validation.md",
     "cat reports/model_leaderboard.md",
+    "cat reports/daily_stress_iteration_log.md",
     "cat reports/NEXT_STATUS.md",
 ]
 
@@ -1242,6 +1244,8 @@ def _ops_summary(output_dir: Path) -> dict[str, Any]:
     ui_check = _validation_check(validation, "scripted_ui_flow_proof")
     broker_check = _validation_check(validation, "broker_readiness")
     ui_checks = ui_check.get("checks", {}) if ui_check else {}
+    broker_labels = broker_check.get("labels", {}) if broker_check else {}
+    broker_rows = broker_check.get("rows", []) if broker_check else []
     return {
         "validation_result": "PASS" if validation and validation.get("all_passed") else "MISSING_OR_FAIL",
         "pytest_result": "PASS" if pytest_check and pytest_check.get("passed") else "MISSING_OR_FAIL",
@@ -1249,9 +1253,31 @@ def _ops_summary(output_dir: Path) -> dict[str, Any]:
         "ui_flow_result": "PASS" if ui_check and ui_check.get("passed") else "MISSING_OR_FAIL",
         "ui_approval_works": "YES" if ui_checks.get("approve_paper_fill") else "NO",
         "restart_reload_works": "YES" if ui_checks.get("restart_sqlite_reload") else "NO",
-        "broker_readiness_result": "PASS" if broker_check and broker_check.get("passed") else "MISSING_OR_FAIL",
-        "broker_readiness_details": broker_check.get("results", {}) if broker_check else {},
+        "mock_api_reload_works": "YES" if ui_checks.get("mock_api_reload") else "NO",
+        "broker_readiness_result": broker_check.get("status", "PASS") if broker_check and broker_check.get("passed") else "MISSING_OR_FAIL",
+        "broker_readiness_details": broker_rows,
+        "MOCK_BROKER_PROVEN": broker_labels.get("MOCK_BROKER_PROVEN", "NO"),
+        "ALPACA_PAPER_PROVEN": broker_labels.get("ALPACA_PAPER_PROVEN", "NO"),
+        "IBKR_READ_ONLY_PROVEN": broker_labels.get("IBKR_READ_ONLY_PROVEN", "NO"),
     }
+
+
+def _fully_achieved_label(summary: dict[str, object], ops_summary: dict[str, Any] | None) -> str:
+    if not ops_summary:
+        return "NO"
+    official_ok_or_skip = (
+        ops_summary.get("ALPACA_PAPER_PROVEN") in {"YES", "SKIP"}
+        or ops_summary.get("IBKR_READ_ONLY_PROVEN") in {"YES", "SKIP"}
+    )
+    checks = [
+        summary.get("weekly_benchmark") == "PASS",
+        ops_summary.get("validation_result") == "PASS",
+        ops_summary.get("ui_flow_result") == "PASS",
+        ops_summary.get("restart_reload_works") == "YES",
+        ops_summary.get("MOCK_BROKER_PROVEN") == "YES",
+        official_ok_or_skip,
+    ]
+    return "YES" if all(checks) else "NO"
 
 
 def build_next_status_markdown(
@@ -1323,8 +1349,14 @@ def build_next_status_markdown(
             f"- ui_flow_result: {ops_summary['ui_flow_result']}",
             f"- ui_approval_works: {ops_summary['ui_approval_works']}",
             f"- restart_reload_works: {ops_summary['restart_reload_works']}",
+            f"- mock_api_reload_works: {ops_summary['mock_api_reload_works']}",
             f"- broker_readiness_result: {ops_summary['broker_readiness_result']}",
             f"- broker_readiness_details: {ops_summary['broker_readiness_details']}",
+            f"- MOCK_BROKER_PROVEN: {ops_summary['MOCK_BROKER_PROVEN']}",
+            f"- ALPACA_PAPER_PROVEN: {ops_summary['ALPACA_PAPER_PROVEN']}",
+            f"- IBKR_READ_ONLY_PROVEN: {ops_summary['IBKR_READ_ONLY_PROVEN']}",
+            f"- broker_integration_truly_ready: {'MOCK_ONLY_READY' if ops_summary['MOCK_BROKER_PROVEN'] == 'YES' else 'NO'}; official brokers not real-proven when SKIP",
+            f"- FULLY_ACHIEVED: {_fully_achieved_label(summary, ops_summary)}",
         ]
     lines += [
         "",
@@ -1431,6 +1463,30 @@ def build_iteration_log_markdown(
         "- keep_decision_rule: keep only if keep_coverage moves toward >= 5.0, expectancy > 0, weekly >= 1.0",
         f"- keep_or_revert: {keep_rule}",
         f"- stop_reason: {stop_reason}",
+    ]
+    return "\n".join(lines) + "\n"
+
+
+def build_daily_stress_iteration_log_markdown(source_of_truth_row: RealBenchmarkRow) -> str:
+    lines = [
+        "# Daily Stress Iteration Log",
+        "",
+        "Secondary benchmark only. No architecture change. No leverage change. No exit-rule work.",
+        "",
+        "## Iteration 0 - current safe baseline",
+        "- iteration_number: 0",
+        "- knob_changes: none",
+        f"- weekly_return_pct: {_fmt_metric(source_of_truth_row.weekly_return_pct)}",
+        f"- weekly_benchmark: {_weekly_benchmark_label(source_of_truth_row)}",
+        f"- daily_return_pct: {_fmt_metric(source_of_truth_row.daily_return_pct)}",
+        f"- daily_stress_benchmark: {_daily_stress_label(source_of_truth_row)}",
+        f"- daily_stress_exact_blocker: {_daily_stress_blocker(source_of_truth_row)}",
+        f"- expectancy: {_fmt_metric(source_of_truth_row.expectancy, digits=6)}",
+        f"- max_drawdown_pct: {_fmt_metric(source_of_truth_row.max_drawdown_pct)}",
+        f"- keep_coverage_pct: {_fmt_metric(source_of_truth_row.keep_coverage_pct, digits=2)}",
+        "- decision: keep baseline; daily stress tuning deferred until broker-readiness outputs are present",
+        "- allowed_future_knobs: confidence threshold; abstain threshold; disagreement threshold; cost buffer threshold",
+        "- stop_reason: daily_return_pct below 1.0; report FAIL honestly",
     ]
     return "\n".join(lines) + "\n"
 
@@ -2451,12 +2507,17 @@ def main(argv: list[str] | None = None) -> int:
         build_iteration_log_markdown(champion_row, source_of_truth_row, gate_overrides, config),
         encoding="utf-8",
     )
+    (output_dir / "daily_stress_iteration_log.md").write_text(
+        build_daily_stress_iteration_log_markdown(source_of_truth_row),
+        encoding="utf-8",
+    )
 
     print(f"[COMPARE] leaderboard={output_dir / 'model_leaderboard.md'}")
     print(f"[COMPARE] benchmark={output_dir / 'real_benchmark.md'}")
     print(f"[COMPARE] false_positive={output_dir / 'false_positive_trade_review.md'}")
     print(f"[COMPARE] next={output_dir / 'NEXT_STATUS.md'}")
     print(f"[COMPARE] iteration_log={output_dir / 'iteration_log.md'}")
+    print(f"[COMPARE] daily_stress_iteration_log={output_dir / 'daily_stress_iteration_log.md'}")
     print(
         "[COMPARE] RESULT: "
         f"{_pass_fail_label(source_of_truth_row)} champion={champion_row.model_name if champion_row is not None else 'NONE'} "
