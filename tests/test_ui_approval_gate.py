@@ -70,8 +70,8 @@ def test_generate_suggestion_does_not_submit_trade_before_approval(tmp_path, mon
     assert len(state["broker"].get_orders()) == 1
 
 
-def test_latest_row_scalar_accepts_series_value():
-    row = pd.DataFrame({"Close": [101.0, 102.5], "vol_20": [0.01, 0.02]}, index=[0, 0]).loc[0]
+def test_latest_numeric_column_value_accepts_duplicate_index_series():
+    frame = pd.DataFrame({"Close": [101.0, 102.5], "vol_20": [0.01, 0.02]}, index=[0, 0])
 
-    assert app._latest_row_scalar(row, "Close") == 102.5
-    assert app._latest_row_scalar(row, "vol_20") == 0.02
+    assert app._latest_numeric_column_value(frame, "Close") == 102.5
+    assert app._latest_numeric_column_value(frame, "vol_20") == 0.02

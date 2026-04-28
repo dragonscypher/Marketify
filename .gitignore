@@ -3,6 +3,7 @@ __pycache__/
 *.py[cod]
 .venv/
 .env
+user_config.yaml
 .ipynb_checkpoints/
 
 # Runtime outputs only
