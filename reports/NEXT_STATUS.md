@@ -2,7 +2,8 @@
 
 timestamp: 2026-04-29T03:05:00+00:00
 base_commit_before_final_external_closure: 3942109
-pending_final_commit_hash: generated_after_this_report
+pushed_source_commit_before_final_colab: 0298815e9d703474043623ff6d8fccff9c49d277
+final_colab_rerun_commit: 0298815
 CORE_PAPER_ENGINE: YES
 STRICT_LOCAL_DONE: YES
 FINAL_POLISH_DONE: YES
@@ -27,10 +28,11 @@ ALPACA_SKIP_REASON: Alpaca paper env unavailable
 IBKR_READ_ONLY_PROVEN: SKIP
 IBKR_SKIP_REASON: IBKR env unavailable
 WEEKLY_BENCHMARK: PASS
+weekly_return_pct: 1.2725
 DAILY_STRESS: FAIL
-daily_return_pct: 0.0119
+daily_return_pct: -0.0519
 daily_stress_target_pct: 1.0000
-daily_stress_exact_blocker: daily_return_pct 0.0119 below 1.0
+daily_stress_exact_blocker: daily_return_pct -0.0519 below 1.0
 exact_blocker: none
 PII_GITHUB_AUDIT: FIXED
 PII_GITHUB_AUDIT_REASON: no active secrets found; active local config remains ignored; current audit file sanitized a prior low-risk local-username marker from an audit-command description.
@@ -73,12 +75,13 @@ daily_stress_iteration_decision: no safe optional knob change applied; baseline 
 - real browser DOM/click actions at http://127.0.0.1:7860/
 - broker readiness read-only check via scripts.validate_marketify.run_broker_readiness()
 - Python audit scans over tracked files, selected reports, user_config.yaml, and git history high-risk markers.
+- Final Colab fresh clone block against commit 0298815: pytest 154 passed; validation_result PASS; broker_readiness_result PASS_WITH_SKIPS; compare RESULT PASS champion=xgb weekly=1.2725%.
 
 ## Exact Errors / Limitations
 - RESOLVED_BROWSER_ERROR: first real Generate Suggestion click raised TypeError: float() argument must be a string or a real number, not 'Series' at app.py last_price extraction. Fixed by normalizing latest numeric column extraction for yfinance MultiIndex/duplicate-column layouts.
 - ALPACA_PAPER_PROVEN: SKIP - Alpaca paper env unavailable.
 - IBKR_READ_ONLY_PROVEN: SKIP - IBKR env unavailable.
-- DAILY_STRESS: FAIL - daily_return_pct 0.0119 below 1.0.
+- DAILY_STRESS: FAIL - daily_return_pct -0.0519 below 1.0.
 - GHAS_SECRET_SCAN: unavailable because GitHub Advanced Security is not enabled for the repository; local/manual scan completed and found no active secrets.
 
 ## Final Remaining Blockers

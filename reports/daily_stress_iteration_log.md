@@ -3,15 +3,15 @@
 Optional non-core polish only. No architecture change. No new model family. No leverage increase. No exit-rule work.
 
 ## Iteration 0 - frozen safe baseline
-- commit_hash: 9ba405a
+- commit_hash: 0298815
 - changed_knobs: none
-- weekly_return_pct: 1.9322
+- weekly_return_pct: 1.2725
 - weekly_benchmark: PASS
-- daily_return_pct: 0.0119
+- daily_return_pct: -0.0519
 - daily_stress_benchmark: FAIL
-- daily_stress_exact_blocker: daily_return_pct 0.0119 below 1.0
-- expectancy: 3.339271
-- max_drawdown_pct: 1.0113
+- daily_stress_exact_blocker: daily_return_pct -0.0519 below 1.0
+- expectancy: 2.715287
+- max_drawdown_pct: 0.6338
 - strict_local_done: YES
 - keep_or_revert: KEEP
 - stop_reason: optional daily-stress loop not applied; no safe knob change required for core/strict-local closure
@@ -24,7 +24,7 @@ Optional non-core polish only. No architecture change. No new model family. No l
 
 ## Decision
 - DAILY_STRESS: FAIL
-- exact_numeric_reason: daily_return_pct 0.0119 < 1.0
+- exact_numeric_reason: daily_return_pct -0.0519 < 1.0
 - weekly PASS preserved: YES
 - strict local done preserved: YES
 
