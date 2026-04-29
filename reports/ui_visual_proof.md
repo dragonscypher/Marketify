@@ -11,54 +11,56 @@ browser_e2e_unavailable: NO
 ## Panels Visible
 | panel | status | evidence |
 | --- | --- | --- |
-| risk disclaimer | PASS | DOM text: Experimental paper-trading engine. No financial advice. Trading involves risk, including loss of principal. Target metrics are benchmarks, not guarantees. |
-| benchmark disclaimer | PASS | DOM text: Benchmark goal can track 1% weekly paper performance, but benchmark is not guarantee. |
-| pending trade idea | PASS | Pending Trade Idea dataframe visible and populated after Generate Suggestion. |
-| approve button | PASS | Approve button clicked in browser. |
-| reject button | PASS | Reject button clicked in browser. |
-| account equity/cash | PASS | Account dataframe visible before and after approval. |
-| positions | PASS | AAPL position visible after approval and after restart. |
-| open orders | PASS | Filled order visible after approval and after restart. |
-| fills | PASS | Fill visible after Refresh Dashboard and after restart. |
-| realized/unrealized pnl | PASS | PnL Summary visible; unrealized_pnl updated after fill. |
-| risk events | PASS | Risk Events dataframe visible. |
+| risk disclaimer | PASS | Experimental paper-trading engine; no financial advice; trading risk; benchmarks not guarantees. |
+| benchmark disclaimer | PASS | Benchmark goal can track 1% weekly paper performance, but benchmark is not guarantee. |
+| pending trade idea | PASS | Pending Trade Idea table visible and populated after Generate Suggestion. |
+| approve button | PASS | Approve clicked in browser. |
+| reject button | PASS | Reject clicked in browser. |
+| account equity/cash | PASS | Account table visible before reject, after reject, after approve, and after restart. |
+| positions | PASS | Empty after reject; AAPL position visible after approve and restart. |
+| orders | PASS | Empty after reject; filled order visible after approve and restart. |
+| fills | PASS | Empty after reject; fill visible after approve and restart. |
+| pnl summary | PASS | PnL Summary visible and updated after approve. |
+| risk events | PASS | Risk Events table visible. |
 | model leaderboard | PASS | Model Leaderboard panel visible. |
-| weekly benchmark PASS/FAIL | PASS | Benchmark Status textbox visible. |
-| daily stress PASS/FAIL | PASS | Benchmark Status textbox visible. |
-| kill switch | PASS | Toggle Kill Switch button visible. |
-| reset paper account with confirmation | PASS | Reset confirmation textbox + Reset Paper Account button visible. |
+| benchmark status | PASS | Benchmark Status textbox visible. |
 | local model status | PASS | Local Model Status textbox visible. |
-| safety status | PASS | Safety Status textbox visible with paper_only_default=YES and approval_required=YES. |
+| safety status | PASS | Safety Status textbox visible. |
+| reset confirmation | PASS | Reset Paper Account required exact RESET PAPER confirmation. |
 
-## Real Browser Flow Proof
-- Opened http://127.0.0.1:7860/ and clicked the Trading tab.
-- Initial account before trade: cash 10000, equity 10000, realized_pnl 0, unrealized_pnl 0.
-- Default 5m/60d Generate Suggestion safely produced risk rejection expected_return_below_threshold and no order.
-- Selected AAPL interval 1m and period 7d for proof. No risk limits, leverage, model family, architecture, or exit-rule settings changed.
-- Generate Suggestion produced pending idea: AAPL buy qty 3, confidence 1, expected_return 0.0024088823702186346, cvar_95 0.0006221716875696939.
+## Real Browser Flow Rerun
+- Opened http://127.0.0.1:7860/ and clicked Trading.
+- Reset setup: typed RESET PAPER, clicked Reset Paper Account, clicked Refresh Dashboard, clicked Reset Halt.
+- Proof data combo: AAPL, interval 1m, period 7d, no pre/post market.
+- No risk limits, leverage, model family, architecture, or exit rules changed.
 
 ### Reject flow
+- Account before reject proof: cash 10000, equity 10000, realized_pnl 0, unrealized_pnl 0.
+- Generate Suggestion produced pending idea: AAPL buy qty 3, confidence 1, expected_return 0.0003389495250303298, cvar_95 0.0019211889435489793.
 - Clicked Reject.
 - Status visible: [ACTIVE] Pending suggestion rejected. No trade submitted.
-- Account unchanged: cash 10000, equity 10000, realized_pnl 0, unrealized_pnl 0.
-- No order/fill/position was created by the rejected suggestion.
+- After Refresh Dashboard: cash 10000, equity 10000, realized_pnl 0, unrealized_pnl 0.
+- No visible position/order/fill row was created by the rejected suggestion.
 
 ### Approve flow
-- Clicked Generate Suggestion again.
+- Generated a new pending idea: AAPL buy qty 3, confidence 1, expected_return 0.0003389495250303298, cvar_95 0.0019211889435489793.
 - Clicked Approve.
-- Status visible: [ACTIVE] Approved and submitted paper order f425332b-ec1b-4131-a120-f4b611c72df6.
-- Account visible: cash 9187.236238739224, equity 9999.756227752896, unrealized_pnl -0.08125199890127988.
-- Position visible: AAPL qty 3, avg_cost 270.8670803375244, mark_price 270.8399963378906, market_value 812.5199890136719.
-- Order visible: order_id f425332b-ec1b-4131-a120-f4b611c72df6, symbol AAPL, side buy, qty 3, status filled.
-- Clicked Refresh Dashboard.
-- Fill visible: fill_id aa37f2af-daa5-459b-a035-c649a888d545, order_id f425332b-ec1b-4131-a120-f4b611c72df6, symbol AAPL, side buy, qty 3.
-- PnL Summary visible: equity 9999.756227752896, cash 9187.236238739224, realized_pnl 0, unrealized_pnl -0.08125199890127988.
+- Status visible: [ACTIVE] Approved and submitted paper order f5b12808-f64f-4b26-b578-abebd6c88ecc.
+- Account visible: cash 9193.37302807701, equity 9999.758068360214, realized_pnl 0, unrealized_pnl -0.0806385040282862.
+- Position visible: AAPL qty 3, avg_cost 268.82189292907714, mark_price 268.7950134277344, market_value 806.3850402832031.
+- Order visible: order_id f5b12808-f64f-4b26-b578-abebd6c88ecc, AAPL buy qty 3, status filled.
+- Fill visible: fill_id 42736fec-ed60-48e3-ab77-ccb311768d92, order_id f5b12808-f64f-4b26-b578-abebd6c88ecc, AAPL buy qty 3.
+- PnL Summary visible: equity 9999.758068360214, cash 9193.37302807701, realized_pnl 0, unrealized_pnl -0.0806385040282862.
 
 ### Restart reload flow
-- Killed the running app terminal.
-- Restarted the app with python app.py.
+- Killed running app process.
+- Restarted app with python app.py.
 - Opened a fresh browser page and clicked Trading.
-- Verified persisted state returned from SQLite: cash 9187.236238739224, equity 9999.756227752896, AAPL qty 3, filled order f425332b-ec1b-4131-a120-f4b611c72df6, fill aa37f2af-daa5-459b-a035-c649a888d545, and PnL Summary values still visible.
+- Verified persisted SQLite state: cash 9193.37302807701, equity 9999.758068360214, AAPL qty 3, filled order f5b12808-f64f-4b26-b578-abebd6c88ecc, fill 42736fec-ed60-48e3-ab77-ccb311768d92, and matching PnL Summary values visible after restart.
+
+## Scripted Regression Proof
+- scripts/local_run_readiness.py also passed reject, approve, fill, and restart reload checks with a temporary SQLite DB.
+- This scripted check is regression support only; REAL_BROWSER_CLICK_PROOF above came from real browser DOM/click actions.
 
 ## Guardrails Verified
 - paper_only_default: YES

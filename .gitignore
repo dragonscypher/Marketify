@@ -2,16 +2,29 @@
 __pycache__/
 *.py[cod]
 .venv/
+*.egg-info/
 .env
 user_config.yaml
 .ipynb_checkpoints/
+marketify.ipynb
+Marketify_Pro.ipynb
+archive/notebooks/*.ipynb
 
 # Runtime outputs only
-/reports/
+/reports/*
+!/reports/NEXT_STATUS.md
+!/reports/broker_validation.md
+!/reports/daily_stress_iteration_log.md
+!/reports/pii_github_audit.md
+!/reports/ui_visual_proof.md
+!/reports/validation_summary.md
 /data/
 /artifacts/
 /models/artifacts/
 *.db
+*.sqlite
+*.sqlite3
+*.zip
 
 # OS / IDE
 .DS_Store

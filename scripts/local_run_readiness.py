@@ -57,6 +57,13 @@ def _rel(path: Path) -> str:
         return str(path).replace("\\", "/")
 
 
+def _rel_text(value: Any) -> str:
+    if not isinstance(value, str) or not value:
+        return str(value)
+    path = Path(value)
+    return _rel(path if path.is_absolute() else ROOT / path)
+
+
 def _read_json(path: Path) -> dict[str, Any]:
     try:
         return json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
@@ -71,13 +78,15 @@ def _local_model_probe() -> dict[str, Any]:
 
     config = AppConfig()
     ticker = config.data.ticker
-    expected_static_artifacts = [
-        str((ROOT / "artifacts" / f"xgb_{ticker}.pkl").resolve()),
-        str((ROOT / "artifacts" / f"ridge_{ticker}.pkl").resolve()),
+    expected_static_paths = [
+        ROOT / "artifacts" / f"xgb_{ticker}.pkl",
+        ROOT / "artifacts" / f"ridge_{ticker}.pkl",
     ]
-    existing_static_artifacts = [path for path in expected_static_artifacts if Path(path).exists()]
+    expected_static_artifacts = [_rel(path) for path in expected_static_paths]
+    existing_static_artifacts = [_rel(path) for path in expected_static_paths if path.exists()]
     model, status = app._load_local_model_artifact(ticker)
     status = dict(status)
+    status["loaded_artifact_path"] = _rel_text(status.get("loaded_artifact_path", "MISSING"))
     status["expected_static_artifacts"] = expected_static_artifacts
     status["existing_static_artifacts"] = existing_static_artifacts
     status["train_locally_ran"] = "NO"
@@ -119,7 +128,7 @@ def _artifact_sync_probe(model: dict[str, Any]) -> dict[str, Any]:
         "config_hash": manifest.get("config_hash", "MISSING"),
         "local_artifact_present": "YES" if local_artifact_present else "NO",
         "local_model_load": model.get("LOCAL_MODEL_LOAD", "NO"),
-        "loaded_artifact_path": model.get("loaded_artifact_path", "MISSING"),
+        "loaded_artifact_path": _rel_text(model.get("loaded_artifact_path", "MISSING")),
         "loaded_model_type": model.get("loaded_model_type", "MISSING"),
         "loaded_model_class": model.get("loaded_model_class", "MISSING"),
         "inference_smoke": model.get("inference_smoke", "FAIL"),
@@ -326,12 +335,13 @@ def _write_reports(
             {"phase": "flow_b", "check": "approve made fill", "status": "PASS" if flow["approve_fill_proven"] else "FAIL", "evidence": json.dumps(flow["after_approve"], default=str)},
             {"phase": "flow_c", "check": "restart restored state", "status": "PASS" if flow["restart_reload_proven"] else "FAIL", "evidence": json.dumps({"after_approve": flow["after_approve"], "after_reload": flow["after_reload"]}, default=str)},
             {"phase": "browser", "check": "browser tool used", "status": "PASS" if args.browser_opened == "YES" else "SKIP", "evidence": args.browser_note},
-            {"phase": "browser", "check": "browser interactive click proof", "status": "PASS" if args.browser_interactive_proof == "YES" else "SKIP", "evidence": "open_browser_page opens page only; no DOM click/screenshot tool available"},
+            {"phase": "browser", "check": "browser interactive click proof", "status": "PASS" if args.browser_interactive_proof == "YES" else "SKIP", "evidence": args.browser_note if args.browser_interactive_proof == "YES" else "browser tool not available for DOM click proof"},
         ]
     )
     _write_csv(REPORTS_DIR / "ui_visual_proof.csv", csv_rows)
 
-    local_ui_visual_proof = "YES" if args.browser_interactive_proof == "YES" else "SCRIPTED_ONLY"
+    local_ui_visual_proof = "REAL_BROWSER_DOM_CLICK" if args.browser_interactive_proof == "YES" else "SCRIPTED_ONLY"
+    real_browser_click_proof = "YES" if args.browser_interactive_proof == "YES" else "SKIP"
     approval_gate = flow["approve_fill_proven"]
     strict_checks = {
         "LOCAL_MODEL_LOAD": model.get("LOCAL_MODEL_LOAD") == "YES",
@@ -367,6 +377,8 @@ def _write_reports(
         f"loaded_model_class: {model.get('loaded_model_class', 'MISSING')}",
         f"inference_smoke: {model.get('inference_smoke', 'FAIL')}",
         f"LOCAL_UI_VISUAL_PROOF: {local_ui_visual_proof}",
+        f"REAL_BROWSER_CLICK_PROOF: {real_browser_click_proof}",
+        "REAL_BROWSER_CLICK_PROOF_REASON: " + (args.browser_note if args.browser_interactive_proof == "YES" else "browser DOM/click proof not run"),
         f"APPROVAL_GATE_WORKS: {'YES' if approval_gate else 'NO'}",
         f"REJECT_NO_TRADE_PROVEN: {'YES' if flow['reject_no_trade_proven'] else 'NO'}",
         f"APPROVE_FILL_PROVEN: {'YES' if flow['approve_fill_proven'] else 'NO'}",
@@ -377,6 +389,7 @@ def _write_reports(
         f"WEEKLY_BENCHMARK: {LOCKED_CORE['WEEKLY_BENCHMARK']}",
         f"DAILY_STRESS: {LOCKED_CORE['DAILY_STRESS']}",
         f"STRICT_LOCAL_DONE: {strict_local_done}",
+        f"FULL_EXTERNAL_CLOSURE: {'YES' if strict_local_done == 'YES' and real_browser_click_proof == 'YES' else 'NO'}",
         f"daily_stress_exact_blocker: {LOCKED_CORE['daily_stress_exact_blocker']}",
         f"exact_blocker: {exact_blocker}",
         "paper_only_default: YES",
@@ -396,7 +409,7 @@ def _write_reports(
         f"browser_interactive_proof: {args.browser_interactive_proof}",
         f"browser_note: {args.browser_note}",
         "screenshot_available: NO",
-        "browser_e2e_unavailable: YES - no DOM click/screenshot tool available",
+        "browser_e2e_unavailable: " + ("NO" if args.browser_interactive_proof == "YES" else "YES - no DOM click/screenshot tool available"),
         "",
         "## Panels Visible",
         "| panel | status | evidence |",
@@ -496,7 +509,7 @@ def main(argv: list[str] | None = None) -> int:
     print(f"loaded_artifact_path={model.get('loaded_artifact_path', 'MISSING')}")
     print(f"loaded_model_type={model.get('loaded_model_type', 'MISSING')}")
     print(f"inference_smoke={model.get('inference_smoke', 'FAIL')}")
-    print(f"LOCAL_UI_VISUAL_PROOF={'YES' if args.browser_interactive_proof == 'YES' else 'SCRIPTED_ONLY'}")
+    print(f"LOCAL_UI_VISUAL_PROOF={'REAL_BROWSER_DOM_CLICK' if args.browser_interactive_proof == 'YES' else 'SCRIPTED_ONLY'}")
     print(f"APPROVAL_GATE_WORKS={'YES' if flow['approve_fill_proven'] else 'NO'}")
     print(f"REJECT_NO_TRADE_PROVEN={'YES' if flow['reject_no_trade_proven'] else 'NO'}")
     print(f"APPROVE_FILL_PROVEN={'YES' if flow['approve_fill_proven'] else 'NO'}")

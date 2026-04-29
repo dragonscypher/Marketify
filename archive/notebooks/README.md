@@ -1,15 +1,9 @@
 # Archived Notebooks
 
-Research notebooks archived here. Not used by production code.
-
-## Files
-
-- `marketify.ipynb` — Original research/exploration notebook.
-- `Marketify_Pro.ipynb` — Extended research notebook.
+Old exploratory notebooks are not tracked here anymore. Production code and reproducible scripts hold the source of truth.
 
 ## Rules
 
-- Do NOT import notebook code into production `marketify/` package.
-- Any useful logic must be ported into `marketify/` modules with tests.
-- Notebooks are reference only.
+- Do not depend on notebook-only logic.
+- Any useful research logic must be ported into `marketify/` modules with tests.
 - Production source of truth: `marketify/` + `scripts/` + `app.py`.
