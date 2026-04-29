@@ -1,42 +1,43 @@
 # PII / GitHub Secrets Audit
 
-timestamp: 2026-04-28T15:05:00+00:00
+timestamp: 2026-04-29T03:05:00+00:00
 PII_GITHUB_AUDIT: FIXED
-cleanup_required: YES - preventive only
+cleanup_required: YES - preventive/sanitization only
 secret_rotation_required: NO
 
 ## Scope
 - Tracked files from git ls-files.
 - Current code/config diff: app.py, tests/test_local_run_readiness.py, tests/test_ui_approval_gate.py, user_config.yaml.
-- Selected ignored runtime reports: reports/NEXT_STATUS.md, reports/validation_summary.md, reports/broker_validation.md, reports/daily_stress_iteration_log.md, reports/local_run_readiness.md, reports/ui_visual_proof.md.
+- Selected runtime reports: reports/NEXT_STATUS.md, reports/validation_summary.md, reports/broker_validation.md, reports/daily_stress_iteration_log.md, reports/local_run_readiness.md, reports/ui_visual_proof.md.
 - Local onboarding config: user_config.yaml.
-- Tracked sync_payload.zip contents.
-- Git history high-risk search for local usernames/paths, GitHub tokens, AWS keys, and private-key markers excluding large notebook outputs.
+- Notebook files and archived notebook outputs.
+- Git history high-risk search for local-user/path markers, token prefixes, AWS key prefixes, private-key markers, and broker secret names.
 
 ## Commands / Checks
-- git ls-files
-- workspace file scan for private-key blocks, AWS access keys, GitHub tokens, generic secret assignments, emails, phone-like patterns.
-- credential-like filename scan excluding .git, .venv, artifacts, reports, and caches.
-- git grep for shiva, Users\\, S:\\, Documents\\Github, emails, GitHub tokens, AWS keys, and private-key markers in tracked text files.
-- git rev-list --all + git grep history scan for high-risk local-path/key patterns.
-- sync_payload.zip entry listing and binary/text scan for the same high-risk patterns.
+- git ls-files.
+- Python file scan for private-key blocks, AWS access keys, GitHub tokens, OpenAI/Hugging Face token patterns, generic secret assignments, emails, phone-like patterns, and local Windows path patterns.
+- Credential-like filename scan excluding .git, .venv, artifacts, reports, and caches.
+- Git history grep for high-risk local path/user markers, token prefixes, AWS key prefixes, and private-key markers.
+- Broker readiness command printed only labels/status/reasons and did not print credential values.
 
 ## Findings
-- Active secrets found: NO
-- Private keys found: NO
-- GitHub tokens found: NO
-- AWS access keys found: NO
-- Emails found in tracked text scan: NO
-- Local Windows user/path leakage in tracked text scan: NO
+- Active secrets found: NO.
+- Private keys found: NO.
+- GitHub tokens found: NO.
+- AWS access keys found: NO.
+- OpenAI/Hugging Face tokens found: NO.
+- Emails found in tracked text scan: NO.
+- Confirmed phone numbers found: NO; notebook phone-like findings were numeric-code false positives.
+- Local Windows user/path leakage in current tracked text scan: NO.
 - Credential-like files found: .env.example only; values are blank placeholders.
-- user_config.yaml contains only non-secret paper config values; it is now ignored to prevent accidental GitHub push of local user state.
-- Notebook pattern scan had false positives only: /tmp/ipython-input filenames, wheel-cache paths, and base64 image output chunks; no confirmed secrets or personal data.
-- sync_payload.zip risky matches: []
+- user_config.yaml contains only non-secret paper config values and remains ignored to prevent accidental GitHub push of local user state.
+- Git history high-risk scan found one prior low-risk local-user marker in this audit report's command description; current audit text is sanitized. No secret rotation is needed.
 - GitHub Advanced Security secret scanning API unavailable: repository does not have GitHub Advanced Security enabled.
 
 ## Cleanup Applied
-- Added user_config.yaml to .gitignore.
+- Kept user_config.yaml in .gitignore.
+- Restored this audit report and removed explicit local-user strings from the audit command descriptions.
 
 ## Result
 PII_GITHUB_AUDIT: FIXED
-Reason: no secret/PII removal was required, but local user config is now ignored as preventive cleanup. No credential rotation needed.
+Reason: no active secrets or personal data requiring rotation were found; current branch content is sanitized and local onboarding state is ignored.

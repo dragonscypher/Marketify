@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import pickle
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import gradio as gr
 import pandas as pd
@@ -132,22 +132,23 @@ def _predict_with_local_model(model: Any, feat: pd.DataFrame) -> tuple[float | N
 def _latest_numeric_column_value(frame: pd.DataFrame, column: str) -> float:
     if isinstance(frame.columns, pd.MultiIndex):
         matches = [col for col in frame.columns if isinstance(col, tuple) and column in col]
-        if matches:
-            values = frame.loc[:, matches[0]]
-        else:
-            values = frame[column]
+        values: Any = frame.loc[:, matches[0]] if matches else frame[column]
     else:
         values = frame[column]
     if isinstance(values, pd.DataFrame):
         values = values.iloc[:, 0]
     squeezed = values.squeeze()
     if isinstance(squeezed, pd.Series):
-        series = pd.to_numeric(squeezed, errors="coerce").dropna()
+        series = pd.to_numeric(cast(Any, squeezed), errors="coerce").dropna()
     else:
         series = pd.Series([pd.to_numeric(squeezed, errors="coerce")]).dropna()
     if series.empty:
         raise ValueError(f"No numeric {column} value available.")
     return float(series.iloc[-1])
+
+
+def _latest_scalar(frame: pd.DataFrame, column: str) -> float:
+    return _latest_numeric_column_value(frame, column)
 
 
 def bootstrap() -> dict:
@@ -370,7 +371,7 @@ def generate_trade_suggestion(state: dict | None, ticker: str, interval: str, pe
             orders,
         )
 
-    last_price = _latest_numeric_column_value(feat, "Close")
+    last_price = _latest_scalar(feat, "Close")
     state["last_price"] = last_price
 
     broker = state["broker"]
@@ -387,7 +388,7 @@ def generate_trade_suggestion(state: dict | None, ticker: str, interval: str, pe
             last_price=last_price,
             prediction=latest_pred,
             sentiment_score=sentiment.score,
-            volatility=_latest_numeric_column_value(feat, "vol_20"),
+            volatility=_latest_scalar(feat, "vol_20"),
             news_risk=float(news["news_risk"]),
         ),
         equity=broker.get_account()["equity"],
@@ -411,7 +412,7 @@ def generate_trade_suggestion(state: dict | None, ticker: str, interval: str, pe
     decision = state["risk"].evaluate(
         trade=idea,
         account=broker.get_account(),
-        volatility=_latest_numeric_column_value(feat, "vol_20"),
+        volatility=_latest_scalar(feat, "vol_20"),
         news_risk=float(news["news_risk"]),
         mark_price=last_price,
     )

@@ -28,7 +28,7 @@ Optional non-core polish only. No architecture change. No new model family. No l
 - weekly PASS preserved: YES
 - strict local done preserved: YES
 
-## 2026-04-28 external closure note
+## 2026-04-29 external closure note
 - optional_daily_stress_improvement_attempted: NO
 - reason: no safe non-core knob change was required for external closure; user locked no architecture/model/leverage/exit-rule changes.
 - DAILY_STRESS remains honest FAIL.
