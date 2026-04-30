@@ -1,16 +1,19 @@
 # NEXT_STATUS
 
-timestamp: 2026-04-30T01:11:33.859422+00:00
-commit_hash: 7468994
+timestamp: 2026-04-30T01:26:57.224016+00:00
+commit_hash: 38456cf
 CORE_PAPER_ENGINE: YES
 LOCAL_KERNEL_FIXED: YES
 REAL_INTERPRETER_PATH: .venv/Scripts/python.exe
 REAL_PLATFORM: Windows-11-10.0.26200-SP0
 NVIDIA_SMI_WORKS: YES
+TORCH_VERSION: 2.11.0+cu128
+TORCH_CUDA_BUILT: 12.8
 TORCH_CUDA_VISIBLE: YES
 LOCAL_GPU_RUNTIME_FIXED: YES
 REAL_GPU_NAME: NVIDIA GeForce RTX 3060 Laptop GPU
 XGB_VERSION: 3.2.0
+XGB_GPU_USABLE: YES
 KERNEL_STILL_WRONG: NO
 PYTHON_EXECUTABLE: .venv/Scripts/python.exe
 LOCAL_GPU_AVAILABLE: YES
@@ -41,12 +44,12 @@ ALPACA_PAPER_PROVEN: SKIP
 IBKR_READ_ONLY_PROVEN: SKIP
 WEEKLY_BENCHMARK: PASS
 DAILY_STRESS: FAIL
-weekly_return_pct: 7.3841
-daily_return_pct: 0.0647
-sharpe: 0.5497
-max_drawdown_pct: 6.1996
-trade_count: 7
-expectancy: -2.374443
+weekly_return_pct: 7.5063
+daily_return_pct: 0.0655
+sharpe: 0.5555
+max_drawdown_pct: 6.2752
+trade_count: 2
+expectancy: -8.202500
 STRICT_LOCAL_DONE: YES
 FULL_EXTERNAL_CLOSURE: YES
 daily_stress_exact_blocker: daily_return_pct below 1.0
@@ -65,7 +68,11 @@ browser_note: local GPU/runtime rerun
 - .venv/Scripts/python.exe -c "import torch; print('CUDA', torch.cuda.is_available()); print('GPU', torch.cuda.get_device_name(0) if torch.cuda.is_available() else 'NO_GPU')"
 - .venv/Scripts/python.exe -c "import xgboost as xgb; print(xgb.__version__)"
 - nvidia-smi
-- .venv/Scripts/python.exe -m pip install --upgrade --force-reinstall torch --index-url https://download.pytorch.org/whl/cu128
+- .venv/Scripts/python.exe -m pip uninstall -y torch torchvision torchaudio
+- .venv/Scripts/python.exe -m pip cache purge
+- .venv/Scripts/python.exe -m pip install --upgrade pip setuptools wheel
+- .venv/Scripts/python.exe -m pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu128
+- .venv/Scripts/python.exe -c "tiny xgboost cuda smoke fit"
 - .venv/Scripts/python.exe -m pip install -r requirements-colab.txt -q
 - .venv/Scripts/python.exe -m pip install -e . -q
 - .venv/Scripts/python.exe -m pytest tests/ -q

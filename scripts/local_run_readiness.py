@@ -95,6 +95,42 @@ def _detect_cuda() -> tuple[bool, str]:
         return False, "NO_GPU"
 
 
+def _torch_runtime_info() -> dict[str, str]:
+    try:
+        import torch
+
+        return {
+            "TORCH_VERSION": str(torch.__version__),
+            "TORCH_CUDA_BUILT": str(torch.version.cuda),
+        }
+    except Exception as exc:
+        return {
+            "TORCH_VERSION": f"UNKNOWN ({type(exc).__name__}: {exc})",
+            "TORCH_CUDA_BUILT": "UNKNOWN",
+        }
+
+
+def _xgb_gpu_usable() -> bool:
+    try:
+        import xgboost as xgb
+
+        x = np.asarray([[0.0, 1.0], [1.0, 0.0], [2.0, 1.0], [3.0, 0.0]], dtype=np.float32)
+        y = np.asarray([0.0, 1.0, 1.5, 2.0], dtype=np.float32)
+        model = xgb.XGBRegressor(
+            n_estimators=2,
+            max_depth=1,
+            tree_method="hist",
+            device="cuda",
+            objective="reg:squarederror",
+            n_jobs=1,
+            verbosity=0,
+        )
+        model.fit(x, y)
+        return True
+    except Exception:
+        return False
+
+
 def _nvidia_smi_works() -> bool:
     try:
         result = subprocess.run(
@@ -148,10 +184,12 @@ def _read_report_value(path: Path, key: str, default: str = "MISSING") -> str:
 
 def _runtime_report_labels() -> dict[str, str]:
     cuda_available, gpu_name = _detect_cuda()
+    torch_info = _torch_runtime_info()
     nvidia_smi = _nvidia_smi_works()
+    xgb_gpu_usable = _xgb_gpu_usable() if cuda_available else False
     low_ram = _env_flag("LOCAL_LOW_RAM_MODE")
     force_gpu_requested = _env_flag("LOCAL_FORCE_GPU")
-    gpu_used = force_gpu_requested and cuda_available
+    gpu_used = force_gpu_requested and cuda_available and xgb_gpu_usable
     recurrent_skipped = low_ram or not cuda_available or not _env_flag("LOCAL_INCLUDE_RECURRENT")
     if low_ram:
         skip_reason = "LOCAL_LOW_RAM_MODE=1 cheap path skips recurrent/fusion heavy branches"
@@ -166,10 +204,13 @@ def _runtime_report_labels() -> dict[str, str]:
         "REAL_INTERPRETER_PATH": _safe_runtime_path(sys.executable),
         "REAL_PLATFORM": platform.platform(),
         "NVIDIA_SMI_WORKS": "YES" if nvidia_smi else "NO",
+        "TORCH_VERSION": torch_info["TORCH_VERSION"],
+        "TORCH_CUDA_BUILT": torch_info["TORCH_CUDA_BUILT"],
         "TORCH_CUDA_VISIBLE": "YES" if cuda_available else "NO",
         "LOCAL_GPU_RUNTIME_FIXED": "YES" if cuda_available else "NO",
         "REAL_GPU_NAME": gpu_name if cuda_available else "NO_GPU",
         "XGB_VERSION": _xgb_version(),
+        "XGB_GPU_USABLE": "YES" if xgb_gpu_usable else "NO",
         "KERNEL_STILL_WRONG": "YES" if _notebook_kernel_still_wrong() else "NO",
         "PYTHON_EXECUTABLE": _safe_runtime_path(sys.executable),
         "LOCAL_GPU_AVAILABLE": "YES" if cuda_available else "NO",
@@ -508,10 +549,13 @@ def _write_reports(
         f"REAL_INTERPRETER_PATH: {runtime['REAL_INTERPRETER_PATH']}",
         f"REAL_PLATFORM: {runtime['REAL_PLATFORM']}",
         f"NVIDIA_SMI_WORKS: {runtime['NVIDIA_SMI_WORKS']}",
+        f"TORCH_VERSION: {runtime['TORCH_VERSION']}",
+        f"TORCH_CUDA_BUILT: {runtime['TORCH_CUDA_BUILT']}",
         f"TORCH_CUDA_VISIBLE: {runtime['TORCH_CUDA_VISIBLE']}",
         f"LOCAL_GPU_RUNTIME_FIXED: {runtime['LOCAL_GPU_RUNTIME_FIXED']}",
         f"REAL_GPU_NAME: {runtime['REAL_GPU_NAME']}",
         f"XGB_VERSION: {runtime['XGB_VERSION']}",
+        f"XGB_GPU_USABLE: {runtime['XGB_GPU_USABLE']}",
         f"KERNEL_STILL_WRONG: {runtime['KERNEL_STILL_WRONG']}",
         f"PYTHON_EXECUTABLE: {runtime['PYTHON_EXECUTABLE']}",
         f"LOCAL_GPU_AVAILABLE: {runtime['LOCAL_GPU_AVAILABLE']}",
@@ -566,7 +610,11 @@ def _write_reports(
         "- .venv/Scripts/python.exe -c \"import torch; print('CUDA', torch.cuda.is_available()); print('GPU', torch.cuda.get_device_name(0) if torch.cuda.is_available() else 'NO_GPU')\"",
         "- .venv/Scripts/python.exe -c \"import xgboost as xgb; print(xgb.__version__)\"",
         "- nvidia-smi",
-        "- .venv/Scripts/python.exe -m pip install --upgrade --force-reinstall torch --index-url https://download.pytorch.org/whl/cu128",
+        "- .venv/Scripts/python.exe -m pip uninstall -y torch torchvision torchaudio",
+        "- .venv/Scripts/python.exe -m pip cache purge",
+        "- .venv/Scripts/python.exe -m pip install --upgrade pip setuptools wheel",
+        "- .venv/Scripts/python.exe -m pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu128",
+        "- .venv/Scripts/python.exe -c \"tiny xgboost cuda smoke fit\"",
         "- .venv/Scripts/python.exe -m pip install -r requirements-colab.txt -q",
         "- .venv/Scripts/python.exe -m pip install -e . -q",
         "- .venv/Scripts/python.exe -m pytest tests/ -q",

@@ -76,10 +76,19 @@ nvidia-smi
 If `nvidia-smi` works but PyTorch prints `False` or `NO_GPU`, the local virtual environment has CPU-only PyTorch. Install a CUDA PyTorch wheel that matches your driver before any GPU benchmark run. For the verified Windows CUDA 12.8 path:
 
 ```powershell
-.\.venv\Scripts\python.exe -m pip install --upgrade --force-reinstall torch --index-url https://download.pytorch.org/whl/cu128
+.\.venv\Scripts\python.exe -m pip uninstall -y torch torchvision torchaudio
+.\.venv\Scripts\python.exe -m pip cache purge
+.\.venv\Scripts\python.exe -m pip install --upgrade pip setuptools wheel
+.\.venv\Scripts\python.exe -m pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu128
 ```
 
 Then rerun the PyTorch check. Continue only when PyTorch sees the GPU, or when `nvidia-smi` confirms no usable NVIDIA GPU exists. If CUDA is unavailable, skip optional heavy retraining. Validation, UI proof, broker skip-proof, and report hygiene still run locally.
+
+Optional XGBoost CUDA smoke check:
+
+```powershell
+.\.venv\Scripts\python.exe -c "import numpy as np, xgboost as xgb; X=np.array([[0,1],[1,0],[2,1],[3,0]], dtype=np.float32); y=np.array([0,1,1.5,2], dtype=np.float32); m=xgb.XGBRegressor(n_estimators=2, max_depth=1, tree_method='hist', device='cuda', objective='reg:squarederror', n_jobs=1); m.fit(X,y); print('XGB_GPU_USABLE YES')"
+```
 
 ## Low-RAM local mode
 

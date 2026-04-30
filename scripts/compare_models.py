@@ -159,6 +159,42 @@ def _detect_cuda() -> tuple[bool, str]:
         return False, f"NO_GPU ({type(exc).__name__}: {exc})"
 
 
+def _torch_runtime_info() -> dict[str, str]:
+    try:
+        import torch
+
+        return {
+            "TORCH_VERSION": str(torch.__version__),
+            "TORCH_CUDA_BUILT": str(torch.version.cuda),
+        }
+    except Exception as exc:
+        return {
+            "TORCH_VERSION": f"UNKNOWN ({type(exc).__name__}: {exc})",
+            "TORCH_CUDA_BUILT": "UNKNOWN",
+        }
+
+
+def _xgb_gpu_usable() -> bool:
+    try:
+        import xgboost as xgb
+
+        x = np.asarray([[0.0, 1.0], [1.0, 0.0], [2.0, 1.0], [3.0, 0.0]], dtype=np.float32)
+        y = np.asarray([0.0, 1.0, 1.5, 2.0], dtype=np.float32)
+        model = xgb.XGBRegressor(
+            n_estimators=2,
+            max_depth=1,
+            tree_method="hist",
+            device="cuda",
+            objective="reg:squarederror",
+            n_jobs=1,
+            verbosity=0,
+        )
+        model.fit(x, y)
+        return True
+    except Exception:
+        return False
+
+
 def _nvidia_smi_works() -> bool:
     try:
         result = subprocess.run(
@@ -219,10 +255,12 @@ def _safe_runtime_path(value: str) -> str:
 
 def _runtime_labels(args: argparse.Namespace) -> dict[str, str]:
     cuda_available, gpu_name = _detect_cuda()
+    torch_info = _torch_runtime_info()
     nvidia_smi = _nvidia_smi_works()
+    xgb_gpu_usable = _xgb_gpu_usable() if cuda_available else False
     low_ram = bool(args.low_ram or _env_flag("LOCAL_LOW_RAM_MODE"))
     force_gpu_requested = _env_flag("LOCAL_FORCE_GPU")
-    force_gpu = force_gpu_requested and cuda_available
+    force_gpu = force_gpu_requested and cuda_available and xgb_gpu_usable
     recurrent_requested = bool(args.include_recurrent or _env_flag("LOCAL_INCLUDE_RECURRENT"))
     recurrent_skipped = low_ram or not cuda_available or not recurrent_requested
     if low_ram:
@@ -236,14 +274,19 @@ def _runtime_labels(args: argparse.Namespace) -> dict[str, str]:
     local_gpu_used = "YES" if force_gpu else "NO"
     if force_gpu_requested and not cuda_available:
         print("[COMPARE] LOCAL_FORCE_GPU ignored: CUDA unavailable")
+    if force_gpu_requested and cuda_available and not xgb_gpu_usable:
+        print("[COMPARE] LOCAL_FORCE_GPU ignored: XGBoost CUDA smoke failed")
     return {
         "LOCAL_KERNEL_FIXED": "YES",
         "REAL_INTERPRETER_PATH": _safe_runtime_path(sys.executable),
         "REAL_PLATFORM": platform.platform(),
         "NVIDIA_SMI_WORKS": "YES" if nvidia_smi else "NO",
+        "TORCH_VERSION": torch_info["TORCH_VERSION"],
+        "TORCH_CUDA_BUILT": torch_info["TORCH_CUDA_BUILT"],
         "TORCH_CUDA_VISIBLE": "YES" if cuda_available else "NO",
         "REAL_GPU_NAME": gpu_name if cuda_available else "NO_GPU",
         "XGB_VERSION": _xgb_version(),
+        "XGB_GPU_USABLE": "YES" if xgb_gpu_usable else "NO",
         "KERNEL_STILL_WRONG": "YES" if _notebook_kernel_still_wrong() else "NO",
         "LOCAL_GPU_RUNTIME_FIXED": "YES" if cuda_available else "NO",
         "PYTHON_EXECUTABLE": _safe_runtime_path(sys.executable),
@@ -1439,7 +1482,11 @@ LOCAL_COMMANDS_RUN = [
     ".venv/Scripts/python.exe -c \"import torch; print('CUDA', torch.cuda.is_available()); print('GPU', torch.cuda.get_device_name(0) if torch.cuda.is_available() else 'NO_GPU')\"",
     ".venv/Scripts/python.exe -c \"import xgboost as xgb; print(xgb.__version__)\"",
     "nvidia-smi",
-    ".venv/Scripts/python.exe -m pip install --upgrade --force-reinstall torch --index-url https://download.pytorch.org/whl/cu128",
+    ".venv/Scripts/python.exe -m pip uninstall -y torch torchvision torchaudio",
+    ".venv/Scripts/python.exe -m pip cache purge",
+    ".venv/Scripts/python.exe -m pip install --upgrade pip setuptools wheel",
+    ".venv/Scripts/python.exe -m pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu128",
+    ".venv/Scripts/python.exe -c \"tiny xgboost cuda smoke fit\"",
     ".venv/Scripts/python.exe -m pip install -r requirements-colab.txt -q",
     ".venv/Scripts/python.exe -m pip install -e . -q",
     ".venv/Scripts/python.exe -m pytest tests/ -q",
@@ -1580,10 +1627,13 @@ def build_next_status_markdown(
             f"- REAL_INTERPRETER_PATH: {runtime_labels.get('REAL_INTERPRETER_PATH', 'UNKNOWN')}",
             f"- REAL_PLATFORM: {runtime_labels.get('REAL_PLATFORM', 'UNKNOWN')}",
             f"- NVIDIA_SMI_WORKS: {runtime_labels.get('NVIDIA_SMI_WORKS', 'NO')}",
+            f"- TORCH_VERSION: {runtime_labels.get('TORCH_VERSION', 'UNKNOWN')}",
+            f"- TORCH_CUDA_BUILT: {runtime_labels.get('TORCH_CUDA_BUILT', 'UNKNOWN')}",
             f"- TORCH_CUDA_VISIBLE: {runtime_labels.get('TORCH_CUDA_VISIBLE', 'NO')}",
             f"- LOCAL_GPU_RUNTIME_FIXED: {runtime_labels.get('LOCAL_GPU_RUNTIME_FIXED', 'NO')}",
             f"- REAL_GPU_NAME: {runtime_labels.get('REAL_GPU_NAME', 'NO_GPU')}",
             f"- XGB_VERSION: {runtime_labels.get('XGB_VERSION', 'UNKNOWN')}",
+            f"- XGB_GPU_USABLE: {runtime_labels.get('XGB_GPU_USABLE', 'NO')}",
             f"- KERNEL_STILL_WRONG: {runtime_labels.get('KERNEL_STILL_WRONG', 'YES')}",
             f"- PYTHON_EXECUTABLE: {runtime_labels.get('PYTHON_EXECUTABLE', 'UNKNOWN')}",
             f"- LOCAL_GPU_AVAILABLE: {runtime_labels.get('LOCAL_GPU_AVAILABLE', 'NO')}",

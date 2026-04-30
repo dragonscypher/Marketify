@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import gc
 import os
+from functools import lru_cache
 
 import numpy as np
 import pandas as pd
@@ -14,11 +15,31 @@ def _env_flag(name: str, default: str = "0") -> bool:
     return os.environ.get(name, default).strip().lower() in {"1", "true", "yes", "y", "on"}
 
 
+@lru_cache(maxsize=1)
+def _xgb_gpu_usable() -> bool:
+    try:
+        x = np.asarray([[0.0, 1.0], [1.0, 0.0], [2.0, 1.0], [3.0, 0.0]], dtype=np.float32)
+        y = np.asarray([0.0, 1.0, 1.5, 2.0], dtype=np.float32)
+        smoke = XGBRegressor(
+            n_estimators=2,
+            max_depth=1,
+            tree_method="hist",
+            device="cuda",
+            objective="reg:squarederror",
+            n_jobs=1,
+            verbosity=0,
+        )
+        smoke.fit(x, y)
+        return True
+    except Exception:
+        return False
+
+
 class XGBModel:
     def __init__(self, config: ModelConfig):
         self.config = config
         low_ram = _env_flag("LOCAL_LOW_RAM_MODE")
-        force_gpu = _env_flag("LOCAL_FORCE_GPU")
+        force_gpu = _env_flag("LOCAL_FORCE_GPU") and _xgb_gpu_usable()
         kwargs = {
             "n_estimators": config.n_estimators,
             "max_depth": config.max_depth,
