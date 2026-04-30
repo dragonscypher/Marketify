@@ -1,7 +1,7 @@
 # NEXT_STATUS
 
-timestamp: 2026-04-30T01:26:57.224016+00:00
-commit_hash: 38456cf
+timestamp: 2026-04-30T07:27:03.434632+00:00
+commit_hash: d4b2b32
 CORE_PAPER_ENGINE: YES
 LOCAL_KERNEL_FIXED: YES
 REAL_INTERPRETER_PATH: .venv/Scripts/python.exe
@@ -44,24 +44,27 @@ ALPACA_PAPER_PROVEN: SKIP
 IBKR_READ_ONLY_PROVEN: SKIP
 WEEKLY_BENCHMARK: PASS
 DAILY_STRESS: FAIL
-weekly_return_pct: 7.5063
-daily_return_pct: 0.0655
-sharpe: 0.5555
-max_drawdown_pct: 6.2752
-trade_count: 2
-expectancy: -8.202500
+weekly_return_pct: 7.7625
+daily_return_pct: 0.0659
+sharpe: 0.5711
+max_drawdown_pct: 6.3315
+trade_count: 0
+expectancy: 0.000000
+total_cycles_run: 3
+total_iterations_run: 6
+best_safe_daily_return_pct: 0.0659
 STRICT_LOCAL_DONE: YES
 FULL_EXTERNAL_CLOSURE: YES
 daily_stress_exact_blocker: daily_return_pct below 1.0
-benchmark_exact_blocker: gap_to_target=0.0 pct_points; expectancy<=0; keep_coverage<5.0%; dominant_gate=below_cost_buffer
+benchmark_exact_blocker: gap_to_target=0.0 pct_points; trade_count=0; approval_count=0; expectancy<=0; keep_coverage<5.0%; dominant_gate=below_cost_buffer
 strict_local_exact_blocker: none
-exact_blocker: daily_return_pct below 1.0; gap_to_target=0.0 pct_points; expectancy<=0; keep_coverage<5.0%; dominant_gate=below_cost_buffer
+exact_blocker: daily_return_pct below 1.0; gap_to_target=0.0 pct_points; trade_count=0; approval_count=0; expectancy<=0; keep_coverage<5.0%; dominant_gate=below_cost_buffer
 paper_only_default: YES
 live_order_path_enabled: NO
 approval_required: YES
 browser_tool_used: YES
 browser_interactive_proof: NO
-browser_note: local GPU/runtime rerun
+browser_note: gpu low-ram iterative rerun
 
 ## Exact Local Commands Run
 - .venv/Scripts/python.exe -c "import sys, platform; print(sys.executable); print(platform.platform())"
@@ -77,6 +80,6 @@ browser_note: local GPU/runtime rerun
 - .venv/Scripts/python.exe -m pip install -e . -q
 - .venv/Scripts/python.exe -m pytest tests/ -q
 - .venv/Scripts/python.exe scripts/validate_marketify.py
-- LOCAL_LOW_RAM_MODE=1 LOCAL_FORCE_GPU=1 .venv/Scripts/python.exe scripts/compare_models.py --low-ram
-- .venv/Scripts/python.exe scripts/local_run_readiness.py --browser-opened YES --browser-note "local GPU/runtime rerun"
+- LOCAL_LOW_RAM_MODE=1 LOCAL_FORCE_GPU=1 .venv/Scripts/python.exe scripts/compare_models.py --low-ram --daily-cycles 3
+- .venv/Scripts/python.exe scripts/local_run_readiness.py --browser-opened YES --browser-note "gpu low-ram iterative rerun"
 - train_and_check skipped: XGB/Ridge artifacts already present and valid; no retrain-everything run needed

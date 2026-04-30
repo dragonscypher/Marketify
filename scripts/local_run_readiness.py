@@ -536,6 +536,10 @@ def _write_reports(
     daily_stress = _read_report_value(real_benchmark, "daily_stress_benchmark", LOCKED_CORE["DAILY_STRESS"])
     daily_blocker = _read_report_value(real_benchmark, "daily_stress_exact_blocker", LOCKED_CORE["daily_stress_exact_blocker"])
     benchmark_blocker = _read_report_value(real_benchmark, "exact_blocker", "none")
+    daily_log = REPORTS_DIR / "daily_stress_iteration_log.md"
+    total_cycles_run = _read_report_value(daily_log, "total_cycles_run", "0")
+    total_iterations_run = _read_report_value(daily_log, "total_iterations_run", "0")
+    best_safe_daily_return_pct = _read_report_value(daily_log, "best_safe_daily_return_pct", daily_return_pct)
     blocker_parts = [part for part in (daily_blocker, benchmark_blocker, exact_blocker) if part and part != "none"]
     combined_exact_blocker = "; ".join(dict.fromkeys(blocker_parts)) if blocker_parts else "none"
 
@@ -592,6 +596,9 @@ def _write_reports(
         f"max_drawdown_pct: {max_drawdown_pct}",
         f"trade_count: {trade_count}",
         f"expectancy: {expectancy}",
+        f"total_cycles_run: {total_cycles_run}",
+        f"total_iterations_run: {total_iterations_run}",
+        f"best_safe_daily_return_pct: {best_safe_daily_return_pct}",
         f"STRICT_LOCAL_DONE: {strict_local_done}",
         f"FULL_EXTERNAL_CLOSURE: {'YES' if strict_local_done == 'YES' and real_browser_click_proof == 'YES' else 'NO'}",
         f"daily_stress_exact_blocker: {daily_blocker}",
@@ -619,8 +626,8 @@ def _write_reports(
         "- .venv/Scripts/python.exe -m pip install -e . -q",
         "- .venv/Scripts/python.exe -m pytest tests/ -q",
         "- .venv/Scripts/python.exe scripts/validate_marketify.py",
-        "- LOCAL_LOW_RAM_MODE=1 LOCAL_FORCE_GPU=1 .venv/Scripts/python.exe scripts/compare_models.py --low-ram",
-        "- .venv/Scripts/python.exe scripts/local_run_readiness.py --browser-opened YES --browser-note \"local GPU/runtime rerun\"",
+        "- LOCAL_LOW_RAM_MODE=1 LOCAL_FORCE_GPU=1 .venv/Scripts/python.exe scripts/compare_models.py --low-ram --daily-cycles 3",
+        "- .venv/Scripts/python.exe scripts/local_run_readiness.py --browser-opened YES --browser-note \"gpu low-ram iterative rerun\"",
         "- train_and_check skipped: XGB/Ridge artifacts already present and valid; no retrain-everything run needed",
     ]
     (REPORTS_DIR / "NEXT_STATUS.md").write_text("\n".join(next_status_lines) + "\n", encoding="utf-8")

@@ -214,10 +214,10 @@ Run same-path benchmark comparison:
 ```powershell
 $env:LOCAL_LOW_RAM_MODE = "1"
 $env:LOCAL_FORCE_GPU = "1"  # only after torch.cuda.is_available() is True
-.\.venv\Scripts\python.exe scripts/compare_models.py --low-ram
+.\.venv\Scripts\python.exe scripts/compare_models.py --low-ram --daily-cycles 3
 ```
 
-This cheap path runs XGBoost plus Ridge first and skips recurrent/fusion heavy branches unless CUDA is available and explicitly requested. It may try up to five small gate-threshold iterations for the daily stress benchmark. Keep a change only when weekly benchmark stays pass, expectancy stays positive, drawdown stays safe, and daily return improves.
+This cheap path runs XGBoost plus Ridge first and skips recurrent/fusion heavy branches unless CUDA is available and explicitly requested. It may try up to three safe cycles with at most five small gate-threshold iterations per cycle for the daily stress benchmark. Keep a change only when weekly benchmark stays pass, expectancy stays positive, drawdown stays safe, trade count does not collapse, and daily return improves.
 
 If CUDA is not available and memory is low, do not brute-force CPU recurrent work. Keep the latest completed benchmark truth and report the skip honestly.
 

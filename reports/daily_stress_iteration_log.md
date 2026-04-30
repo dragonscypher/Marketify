@@ -14,30 +14,37 @@ Secondary benchmark only. No architecture change. No leverage change. No exit-ru
 ## Iteration 0 - current safe baseline
 - iteration_number: 0
 - knob_changes: none
-- weekly_return_pct: 7.5063
+- weekly_return_pct: 7.7625
 - weekly_benchmark: PASS
-- daily_return_pct: 0.0655
+- daily_return_pct: 0.0659
 - daily_stress_benchmark: FAIL
 - daily_stress_exact_blocker: daily_return_pct below 1.0
-- expectancy: -8.202500
-- max_drawdown_pct: 6.2752
-- keep_coverage_pct: 0.28
-- decision: keep baseline; daily stress tuning deferred until broker-readiness outputs are present
-- allowed_future_knobs: confidence threshold; abstain threshold; disagreement threshold; cost buffer threshold
+- expectancy: 0.000000
+- max_drawdown_pct: 6.3315
+- keep_coverage_pct: 0.00
+- decision: keep last retained baseline unless a later candidate passes all guardrails
+- allowed_future_knobs: confidence threshold; abstain threshold; disagreement threshold; cost buffer threshold; entry threshold; min confidence
 - stop_reason: daily_return_pct below 1.0; report FAIL honestly
 
 ## Safe Loop Attempts
-| iteration | knobs | weekly_benchmark | daily_stress | weekly_return_pct | daily_return_pct | expectancy | max_drawdown_pct | keep_or_revert | reason |
-| ---: | --- | --- | --- | ---: | ---: | ---: | ---: | --- | --- |
-| 0 | none | PASS | FAIL | 7.5063 | 0.0655 | -8.202500 | 6.2752 | KEEP_BASELINE | current cheap-path baseline |
-| 1 | approval_precision_threshold=0.300000 | PASS | FAIL | 7.5195 | 0.0656 | -8.230850 | 6.2864 | REVERT | guardrail failed or daily did not improve |
-| 2 | cost_buffer_floor=0.000300 | PASS | FAIL | 7.6261 | 0.0656 | -8.252400 | 6.2976 | REVERT | guardrail failed or daily did not improve |
-| 3 | abstain_margin=0.000025 | PASS | FAIL | 7.6332 | 0.0657 | -8.252400 | 6.3032 | REVERT | guardrail failed or daily did not improve |
-| 4 | approval_precision_threshold=0.300000; cost_buffer_floor=0.000300 | PASS | FAIL | 7.6403 | 0.0657 | -8.252400 | 6.3088 | REVERT | guardrail failed or daily did not improve |
-| 5 | approval_precision_threshold=0.400000 | PASS | FAIL | 7.6474 | 0.0658 | -8.252400 | 6.3145 | REVERT | guardrail failed or daily did not improve |
+- total_cycles_run: 3
+- total_iterations_run: 6
+- best_safe_daily_return_pct: 0.0659
+| cycle | iteration | iteration_id | knobs | gpu_used | recurrent_skipped | weekly_benchmark | daily_stress | weekly_return_pct | daily_return_pct | sharpe | max_drawdown_pct | trade_count | expectancy | keep_or_revert | reason |
+| ---: | ---: | --- | --- | --- | --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | --- | --- |
+| 0 | 0 | baseline | none | YES | YES | PASS | FAIL | 7.7625 | 0.0659 | 0.5711 | 6.3315 | 0 | 0.000000 | KEEP_BASELINE | current cheap-path baseline |
+| 1 | 1 | cycle_1_iter_1 | approval_precision_threshold=0.300000 | YES | YES | PASS | FAIL | 7.7625 | 0.0659 | 0.5711 | 6.3315 | 0 | 0.000000 | REVERT | expectancy<=0; trade_count=0; daily did not improve |
+| 1 | 2 | cycle_1_iter_2 | cost_buffer_floor=0.000300 | YES | YES | PASS | FAIL | 7.7625 | 0.0659 | 0.5711 | 6.3315 | 0 | 0.000000 | REVERT | expectancy<=0; trade_count=0; daily did not improve |
+| 2 | 1 | cycle_2_iter_1 | approval_precision_threshold=0.250000 | YES | YES | PASS | FAIL | 7.7625 | 0.0659 | 0.5711 | 6.3315 | 0 | 0.000000 | REVERT | expectancy<=0; trade_count=0; daily did not improve |
+| 2 | 2 | cycle_2_iter_2 | cost_buffer_floor=0.000300 | YES | YES | PASS | FAIL | 7.7625 | 0.0659 | 0.5711 | 6.3315 | 0 | 0.000000 | REVERT | expectancy<=0; trade_count=0; daily did not improve |
+| 3 | 1 | cycle_3_iter_1 | approval_precision_threshold=0.450000 | YES | YES | PASS | FAIL | 7.7625 | 0.0659 | 0.5711 | 6.3315 | 0 | 0.000000 | REVERT | expectancy<=0; trade_count=0; daily did not improve |
+| 3 | 2 | cycle_3_iter_2 | cost_buffer_floor=0.000375 | YES | YES | PASS | FAIL | 7.7625 | 0.0659 | 0.6512 | 6.3315 | 0 | 0.000000 | REVERT | expectancy<=0; trade_count=0; daily did not improve |
 
 ## Decision
 - WEEKLY_BENCHMARK: PASS
 - DAILY_STRESS: FAIL
+- total_cycles_run: 3
+- total_iterations_run: 6
+- best_safe_daily_return_pct: 0.0659
 - exact_numeric_reason: daily_return_pct below 1.0
 - no_fake_pass: YES

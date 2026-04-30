@@ -139,6 +139,7 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--output-dir", default="reports")
     parser.add_argument("--hold-horizon-bars", type=int, default=default_horizon)
     parser.add_argument("--low-ram", action="store_true", help="run xgb+ridge cheap path and skip recurrent/fusion heavy branches")
+    parser.add_argument("--daily-cycles", type=int, default=3, help="safe daily-stress tuning cycles; max 3")
     parser.add_argument("--include-recurrent", action="store_true", help="allow recurrent support branches only when CUDA is available")
     return parser.parse_args(argv)
 
@@ -1076,32 +1077,88 @@ def _tune_real_path_gate_knobs(
     return TunedGateResult(overrides=best_overrides, row=best_row, result=best_result)
 
 
+def _trade_count_collapsed(current_best: RealBenchmarkRow, candidate: RealBenchmarkRow) -> bool:
+    return bool(int(current_best.trade_count) >= 4 and int(candidate.trade_count) < max(1, int(current_best.trade_count) // 2))
+
+
 def _safe_daily_keep(current_best: RealBenchmarkRow, candidate: RealBenchmarkRow) -> bool:
     return bool(
         _weekly_benchmark_label(candidate) == "PASS"
         and float(candidate.expectancy) > 0.0
         and float(candidate.max_drawdown_pct) <= RISK_DRAWDOWN_LIMIT_PCT
+        and int(candidate.trade_count) > 0
+        and not _trade_count_collapsed(current_best, candidate)
         and float(candidate.daily_return_pct) > float(current_best.daily_return_pct)
     )
 
 
-def _daily_stress_candidate_overrides(config) -> list[dict[str, float]]:
-    thresholds = _signal_gate_thresholds(config)
+def _daily_revert_reason(current_best: RealBenchmarkRow, candidate: RealBenchmarkRow) -> str:
+    reasons: list[str] = []
+    if _weekly_benchmark_label(candidate) != "PASS":
+        reasons.append("weekly benchmark not PASS")
+    if float(candidate.expectancy) <= 0.0:
+        reasons.append("expectancy<=0")
+    if float(candidate.max_drawdown_pct) > RISK_DRAWDOWN_LIMIT_PCT:
+        reasons.append(f"max_drawdown_pct>{RISK_DRAWDOWN_LIMIT_PCT}")
+    if int(candidate.trade_count) <= 0:
+        reasons.append("trade_count=0")
+    if _trade_count_collapsed(current_best, candidate):
+        reasons.append("trade_count collapsed")
+    if float(candidate.daily_return_pct) <= float(current_best.daily_return_pct):
+        reasons.append("daily did not improve")
+    return "; ".join(reasons) or "guardrail failed"
+
+
+def _combine_overrides(base: dict[str, float] | None, delta: dict[str, float]) -> dict[str, float]:
+    combined = dict(base or {})
+    combined.update(delta)
+    return combined
+
+
+def _daily_stress_candidate_overrides(
+    config,
+    base_overrides: dict[str, float] | None = None,
+    cycle: int = 1,
+) -> list[dict[str, float]]:
+    thresholds = _signal_gate_thresholds(config, gate_overrides=base_overrides)
     fee_floor = (float(config.broker.fee_bps) + float(config.broker.slippage_bps)) / 10000.0
     base_cost_floor = max(float(thresholds["edge_floor"]) - float(thresholds["abstain_margin"]), fee_floor)
     base_min_confidence = float(thresholds["min_confidence"])
     base_abstain_margin = float(thresholds["abstain_margin"])
     base_max_disagreement = float(thresholds["max_disagreement"])
-    return [
-        {"approval_precision_threshold": max(base_min_confidence - 0.05, 0.20)},
-        {"cost_buffer_floor": max(base_cost_floor * 0.75, fee_floor)},
-        {"abstain_margin": max(base_abstain_margin * 0.5, 0.0)},
-        {
-            "approval_precision_threshold": max(base_min_confidence - 0.05, 0.20),
-            "cost_buffer_floor": max(base_cost_floor * 0.75, fee_floor),
-        },
-        {"approval_precision_threshold": min(base_min_confidence + 0.05, 0.80)},
-    ]
+    cycle_plans = {
+        1: [
+            {"approval_precision_threshold": max(base_min_confidence - 0.05, 0.20)},
+            {"cost_buffer_floor": max(base_cost_floor * 0.75, fee_floor)},
+            {"abstain_margin": max(base_abstain_margin * 0.5, 0.0)},
+            {
+                "approval_precision_threshold": max(base_min_confidence - 0.05, 0.20),
+                "cost_buffer_floor": max(base_cost_floor * 0.75, fee_floor),
+            },
+            {"approval_precision_threshold": min(base_min_confidence + 0.05, 0.80)},
+        ],
+        2: [
+            {"approval_precision_threshold": max(base_min_confidence - 0.10, 0.15)},
+            {"cost_buffer_floor": max(base_cost_floor * 0.50, fee_floor)},
+            {"abstain_margin": 0.0},
+            {"max_disagreement": max(base_max_disagreement * 1.50, base_max_disagreement + 0.0001)},
+            {
+                "approval_precision_threshold": max(base_min_confidence - 0.10, 0.15),
+                "abstain_margin": 0.0,
+            },
+        ],
+        3: [
+            {"approval_precision_threshold": min(base_min_confidence + 0.10, 0.90)},
+            {"cost_buffer_floor": max(base_cost_floor * 1.25, fee_floor)},
+            {"abstain_margin": max(base_abstain_margin * 2.0, 0.00005)},
+            {"max_disagreement": max(base_max_disagreement * 0.75, 0.0001)},
+            {
+                "approval_precision_threshold": min(base_min_confidence + 0.05, 0.85),
+                "cost_buffer_floor": max(base_cost_floor * 1.10, fee_floor),
+            },
+        ],
+    }
+    return [_combine_overrides(base_overrides, delta) for delta in cycle_plans.get(cycle, cycle_plans[3])]
 
 
 def _run_daily_stress_safe_loop(
@@ -1109,8 +1166,12 @@ def _run_daily_stress_safe_loop(
     xgb_preds: pd.Series,
     config,
     support_preds: dict[str, pd.Series],
+    max_cycles: int = 3,
+    runtime_labels: dict[str, str] | None = None,
 ) -> tuple[TunedGateResult, list[dict[str, object]]]:
     iterations: list[dict[str, object]] = []
+    max_cycles = max(1, min(int(max_cycles), 3))
+    runtime_labels = runtime_labels or {}
     baseline_row, baseline_result = _run_real_lane(
         model_name="xgb",
         feat=feat,
@@ -1127,11 +1188,18 @@ def _run_daily_stress_safe_loop(
     iterations.append(
         {
             "iteration": 0,
+            "iteration_id": "baseline",
+            "cycle": 0,
+            "cycle_iteration": 0,
             "knobs": "none",
+            "gpu_used": runtime_labels.get("LOCAL_GPU_USED", "UNKNOWN"),
+            "recurrent_skipped": runtime_labels.get("RECURRENT_BRANCH_SKIPPED", "UNKNOWN"),
             "weekly_benchmark": _weekly_benchmark_label(baseline_row),
             "daily_stress": _daily_stress_label(baseline_row),
             "daily_return_pct": baseline_row.daily_return_pct,
             "weekly_return_pct": baseline_row.weekly_return_pct,
+            "sharpe": baseline_row.sharpe,
+            "trade_count": baseline_row.trade_count,
             "expectancy": baseline_row.expectancy,
             "max_drawdown_pct": baseline_row.max_drawdown_pct,
             "keep_or_revert": "KEEP_BASELINE",
@@ -1145,44 +1213,69 @@ def _run_daily_stress_safe_loop(
     )
     _empty_memory()
 
-    for idx, overrides in enumerate(_daily_stress_candidate_overrides(config), start=1):
-        row, result = _run_real_lane(
-            model_name="xgb",
-            feat=feat,
-            preds=xgb_preds,
-            config=config,
-            role="candidate",
-            comparison_preds=support_preds,
-            gate_overrides=overrides,
-            notes=f"xgb low-ram daily stress safe loop iteration {idx}",
-        )
-        keep = _safe_daily_keep(best_row, row)
-        if keep:
-            best_row = row
-            best_result = result
-            best_overrides = overrides
-        iterations.append(
-            {
-                "iteration": idx,
-                "knobs": "; ".join(f"{key}={value:.6f}" for key, value in overrides.items()),
-                "weekly_benchmark": _weekly_benchmark_label(row),
-                "daily_stress": _daily_stress_label(row),
-                "daily_return_pct": row.daily_return_pct,
-                "weekly_return_pct": row.weekly_return_pct,
-                "expectancy": row.expectancy,
-                "max_drawdown_pct": row.max_drawdown_pct,
-                "keep_or_revert": "KEEP" if keep else "REVERT",
-                "reason": "daily improved with weekly PASS, expectancy>0, drawdown safe" if keep else "guardrail failed or daily did not improve",
-            }
-        )
-        print(
-            "[COMPARE] daily_loop "
-            f"iteration={idx} keep={'YES' if keep else 'NO'} weekly={row.weekly_return_pct}% "
-            f"daily={row.daily_return_pct}% expectancy={row.expectancy} dd={row.max_drawdown_pct}%"
-        )
-        _empty_memory()
-        if _daily_stress_label(best_row) == "PASS":
-            break
+    global_iteration = 0
+    for cycle in range(1, max_cycles + 1):
+        no_improvement_streak = 0
+        for cycle_iteration, overrides in enumerate(
+            _daily_stress_candidate_overrides(config, base_overrides=best_overrides, cycle=cycle),
+            start=1,
+        ):
+            global_iteration += 1
+            row, result = _run_real_lane(
+                model_name="xgb",
+                feat=feat,
+                preds=xgb_preds,
+                config=config,
+                role="candidate",
+                comparison_preds=support_preds,
+                gate_overrides=overrides,
+                notes=f"xgb low-ram daily stress safe loop cycle {cycle} iteration {cycle_iteration}",
+            )
+            keep = _safe_daily_keep(best_row, row)
+            if keep:
+                best_row = row
+                best_result = result
+                best_overrides = overrides
+                no_improvement_streak = 0
+            else:
+                no_improvement_streak += 1
+            reason = (
+                "daily improved with weekly PASS, expectancy>0, drawdown safe"
+                if keep
+                else _daily_revert_reason(best_row, row)
+            )
+            iterations.append(
+                {
+                    "iteration": global_iteration,
+                    "iteration_id": f"cycle_{cycle}_iter_{cycle_iteration}",
+                    "cycle": cycle,
+                    "cycle_iteration": cycle_iteration,
+                    "knobs": "; ".join(f"{key}={value:.6f}" for key, value in overrides.items()),
+                    "gpu_used": runtime_labels.get("LOCAL_GPU_USED", "UNKNOWN"),
+                    "recurrent_skipped": runtime_labels.get("RECURRENT_BRANCH_SKIPPED", "UNKNOWN"),
+                    "weekly_benchmark": _weekly_benchmark_label(row),
+                    "daily_stress": _daily_stress_label(row),
+                    "daily_return_pct": row.daily_return_pct,
+                    "weekly_return_pct": row.weekly_return_pct,
+                    "sharpe": row.sharpe,
+                    "trade_count": row.trade_count,
+                    "expectancy": row.expectancy,
+                    "max_drawdown_pct": row.max_drawdown_pct,
+                    "keep_or_revert": "KEEP" if keep else "REVERT",
+                    "reason": reason,
+                }
+            )
+            print(
+                "[COMPARE] daily_loop "
+                f"cycle={cycle} iteration={cycle_iteration} keep={'YES' if keep else 'NO'} weekly={row.weekly_return_pct}% "
+                f"daily={row.daily_return_pct}% expectancy={row.expectancy} dd={row.max_drawdown_pct}% trades={row.trade_count}"
+            )
+            _empty_memory()
+            if _daily_stress_label(best_row) == "PASS":
+                return TunedGateResult(overrides=best_overrides, row=best_row, result=best_result), iterations
+            if no_improvement_streak >= 2:
+                print(f"[COMPARE] daily_loop cycle={cycle} stop=no_improvement_streak_2")
+                break
 
     return TunedGateResult(overrides=best_overrides, row=best_row, result=best_result), iterations
 
@@ -1199,6 +1292,13 @@ def _fmt_metric(value: object, digits: int = 4) -> str:
     if isinstance(value, bool):
         return "PASS" if value else "FAIL"
     return str(value)
+
+
+def _as_int(value: object, default: int = 0) -> int:
+    try:
+        return int(cast(Any, value))
+    except Exception:
+        return default
 
 
 def build_xgb_real_leaderboard_markdown(df: pd.DataFrame, champion_row: RealBenchmarkRow) -> str:
@@ -1491,8 +1591,8 @@ LOCAL_COMMANDS_RUN = [
     ".venv/Scripts/python.exe -m pip install -e . -q",
     ".venv/Scripts/python.exe -m pytest tests/ -q",
     ".venv/Scripts/python.exe scripts/validate_marketify.py",
-    "LOCAL_LOW_RAM_MODE=1 LOCAL_FORCE_GPU=1 .venv/Scripts/python.exe scripts/compare_models.py --low-ram",
-    ".venv/Scripts/python.exe scripts/local_run_readiness.py --browser-opened YES --browser-note \"local GPU/runtime rerun\"",
+    "LOCAL_LOW_RAM_MODE=1 LOCAL_FORCE_GPU=1 .venv/Scripts/python.exe scripts/compare_models.py --low-ram --daily-cycles 3",
+    ".venv/Scripts/python.exe scripts/local_run_readiness.py --browser-opened YES --browser-note \"gpu low-ram iterative rerun\"",
     "train_and_check skipped: XGB/Ridge artifacts already present and valid; no retrain-everything run needed",
 ]
 
@@ -1645,17 +1745,26 @@ def build_next_status_markdown(
             f"- SAFE_BENCHMARK_PATH: {runtime_labels.get('SAFE_BENCHMARK_PATH', 'unknown')}",
         ]
     if daily_iterations:
+        trial_iterations = [row_info for row_info in daily_iterations if _as_int(row_info.get("cycle", 0)) > 0]
+        total_cycles_run = len({_as_int(row_info.get("cycle", 0)) for row_info in trial_iterations})
+        total_iterations_run = len(trial_iterations)
         lines += [
             "",
             "## Daily Stress Safe Loop",
-            "| iteration | knobs | weekly_benchmark | daily_stress | weekly_return_pct | daily_return_pct | expectancy | max_drawdown_pct | keep_or_revert | reason |",
-            "| ---: | --- | --- | --- | ---: | ---: | ---: | ---: | --- | --- |",
+            f"- total_cycles_run: {total_cycles_run}",
+            f"- total_iterations_run: {total_iterations_run}",
+            f"- best_safe_daily_return_pct: {_fmt_metric(row.daily_return_pct)}",
+            "| cycle | iteration | iteration_id | knobs | gpu_used | recurrent_skipped | weekly_benchmark | daily_stress | weekly_return_pct | daily_return_pct | sharpe | max_drawdown_pct | trade_count | expectancy | keep_or_revert | reason |",
+            "| ---: | ---: | --- | --- | --- | --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | --- | --- |",
         ]
         for row_info in daily_iterations:
             lines.append(
-                f"| {row_info['iteration']} | {row_info['knobs']} | {row_info['weekly_benchmark']} | {row_info['daily_stress']} | "
+                f"| {row_info.get('cycle', 0)} | {row_info.get('cycle_iteration', row_info['iteration'])} | {row_info.get('iteration_id', row_info['iteration'])} | "
+                f"{row_info['knobs']} | {row_info.get('gpu_used', 'UNKNOWN')} | {row_info.get('recurrent_skipped', 'UNKNOWN')} | "
+                f"{row_info['weekly_benchmark']} | {row_info['daily_stress']} | "
                 f"{_fmt_metric(row_info['weekly_return_pct'])} | {_fmt_metric(row_info['daily_return_pct'])} | "
-                f"{_fmt_metric(row_info['expectancy'], digits=6)} | {_fmt_metric(row_info['max_drawdown_pct'])} | "
+                f"{_fmt_metric(row_info.get('sharpe', 0.0))} | {_fmt_metric(row_info['max_drawdown_pct'])} | "
+                f"{row_info.get('trade_count', 0)} | {_fmt_metric(row_info['expectancy'], digits=6)} | "
                 f"{row_info['keep_or_revert']} | {row_info['reason']} |"
             )
     if ops_summary:
@@ -1816,22 +1925,31 @@ def build_daily_stress_iteration_log_markdown(
         f"- expectancy: {_fmt_metric(source_of_truth_row.expectancy, digits=6)}",
         f"- max_drawdown_pct: {_fmt_metric(source_of_truth_row.max_drawdown_pct)}",
         f"- keep_coverage_pct: {_fmt_metric(source_of_truth_row.keep_coverage_pct, digits=2)}",
-        "- decision: keep baseline; daily stress tuning deferred until broker-readiness outputs are present",
-        "- allowed_future_knobs: confidence threshold; abstain threshold; disagreement threshold; cost buffer threshold",
+        "- decision: keep last retained baseline unless a later candidate passes all guardrails",
+        "- allowed_future_knobs: confidence threshold; abstain threshold; disagreement threshold; cost buffer threshold; entry threshold; min confidence",
         "- stop_reason: daily_return_pct below 1.0; report FAIL honestly",
     ]
     if iterations:
+        trial_iterations = [row_info for row_info in iterations if _as_int(row_info.get("cycle", 0)) > 0]
+        total_cycles_run = len({_as_int(row_info.get("cycle", 0)) for row_info in trial_iterations})
+        total_iterations_run = len(trial_iterations)
         lines += [
             "",
             "## Safe Loop Attempts",
-            "| iteration | knobs | weekly_benchmark | daily_stress | weekly_return_pct | daily_return_pct | expectancy | max_drawdown_pct | keep_or_revert | reason |",
-            "| ---: | --- | --- | --- | ---: | ---: | ---: | ---: | --- | --- |",
+            f"- total_cycles_run: {total_cycles_run}",
+            f"- total_iterations_run: {total_iterations_run}",
+            f"- best_safe_daily_return_pct: {_fmt_metric(source_of_truth_row.daily_return_pct)}",
+            "| cycle | iteration | iteration_id | knobs | gpu_used | recurrent_skipped | weekly_benchmark | daily_stress | weekly_return_pct | daily_return_pct | sharpe | max_drawdown_pct | trade_count | expectancy | keep_or_revert | reason |",
+            "| ---: | ---: | --- | --- | --- | --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | --- | --- |",
         ]
         for row_info in iterations:
             lines.append(
-                f"| {row_info['iteration']} | {row_info['knobs']} | {row_info['weekly_benchmark']} | {row_info['daily_stress']} | "
+                f"| {row_info.get('cycle', 0)} | {row_info.get('cycle_iteration', row_info['iteration'])} | {row_info.get('iteration_id', row_info['iteration'])} | "
+                f"{row_info['knobs']} | {row_info.get('gpu_used', 'UNKNOWN')} | {row_info.get('recurrent_skipped', 'UNKNOWN')} | "
+                f"{row_info['weekly_benchmark']} | {row_info['daily_stress']} | "
                 f"{_fmt_metric(row_info['weekly_return_pct'])} | {_fmt_metric(row_info['daily_return_pct'])} | "
-                f"{_fmt_metric(row_info['expectancy'], digits=6)} | {_fmt_metric(row_info['max_drawdown_pct'])} | "
+                f"{_fmt_metric(row_info.get('sharpe', 0.0))} | {_fmt_metric(row_info['max_drawdown_pct'])} | "
+                f"{row_info.get('trade_count', 0)} | {_fmt_metric(row_info['expectancy'], digits=6)} | "
                 f"{row_info['keep_or_revert']} | {row_info['reason']} |"
             )
         lines += [
@@ -1839,6 +1957,9 @@ def build_daily_stress_iteration_log_markdown(
             f"## Decision",
             f"- WEEKLY_BENCHMARK: {_weekly_benchmark_label(source_of_truth_row)}",
             f"- DAILY_STRESS: {_daily_stress_label(source_of_truth_row)}",
+            f"- total_cycles_run: {total_cycles_run}",
+            f"- total_iterations_run: {total_iterations_run}",
+            f"- best_safe_daily_return_pct: {_fmt_metric(source_of_truth_row.daily_return_pct)}",
             f"- exact_numeric_reason: {_daily_stress_blocker(source_of_truth_row)}",
             "- no_fake_pass: YES",
         ]
@@ -2742,6 +2863,8 @@ def main(argv: list[str] | None = None) -> int:
                 prediction_rows["xgb"],
                 config,
                 support_preds,
+                max_cycles=args.daily_cycles,
+                runtime_labels=runtime_labels,
             )
         else:
             tuned_gate_result = _tune_real_path_gate_knobs(
