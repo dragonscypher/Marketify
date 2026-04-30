@@ -43,6 +43,12 @@ Secondary benchmark only. No architecture change. No leverage change. No exit-ru
 ## Decision
 - WEEKLY_BENCHMARK: PASS
 - DAILY_STRESS: FAIL
+- daily_stress_hard_gate: NO
+- daily_stress_role: INFORMATIONAL_STRETCH
+- chosen_next_move: OPTION_A_STOP_DAILY_AS_HARD_GATE
+- reason: 3 safe low-RAM cycles exhausted; threshold/gate tuning collapsed trade_count/expectancy while weekly stayed PASS
+- another_tuning_loop_justified: NO
+- last_safe_frontier: no deployable daily-stress frontier; latest weekly PASS row has trade_count=0 and expectancy=0.000000
 - total_cycles_run: 3
 - total_iterations_run: 6
 - best_safe_daily_return_pct: 0.0659

@@ -44,6 +44,13 @@ ALPACA_PAPER_PROVEN: SKIP
 IBKR_READ_ONLY_PROVEN: SKIP
 WEEKLY_BENCHMARK: PASS
 DAILY_STRESS: FAIL
+weekly_benchmark_primary_gate: YES
+daily_stress_hard_gate: NO
+daily_stress_role: INFORMATIONAL_STRETCH
+daily_hard_gate_drop_reason: 3 safe low-RAM cycles exhausted; threshold/gate tuning collapsed trade_count/expectancy while weekly stayed PASS
+another_tuning_loop_justified: NO
+chosen_next_move: OPTION_A_STOP_DAILY_AS_HARD_GATE
+last_safe_frontier: no deployable daily-stress frontier; latest weekly PASS row has trade_count=0 and expectancy=0.000000
 weekly_return_pct: 7.7625
 daily_return_pct: 0.0659
 sharpe: 0.5711
@@ -67,6 +74,8 @@ browser_interactive_proof: NO
 browser_note: gpu low-ram iterative rerun
 
 ## Exact Local Commands Run
+- FRONTIER_ANALYSIS: read reports/NEXT_STATUS.md reports/daily_stress_iteration_log.md reports/model_leaderboard.md reports/real_benchmark.md
+- CHOSEN_OPTION: A - stop daily stress as hard gate; no new benchmark loop run
 - .venv/Scripts/python.exe -c "import sys, platform; print(sys.executable); print(platform.platform())"
 - .venv/Scripts/python.exe -c "import torch; print('CUDA', torch.cuda.is_available()); print('GPU', torch.cuda.get_device_name(0) if torch.cuda.is_available() else 'NO_GPU')"
 - .venv/Scripts/python.exe -c "import xgboost as xgb; print(xgb.__version__)"

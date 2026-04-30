@@ -217,7 +217,7 @@ $env:LOCAL_FORCE_GPU = "1"  # only after torch.cuda.is_available() is True
 .\.venv\Scripts\python.exe scripts/compare_models.py --low-ram --daily-cycles 3
 ```
 
-This cheap path runs XGBoost plus Ridge first and skips recurrent/fusion heavy branches unless CUDA is available and explicitly requested. It may try up to three safe cycles with at most five small gate-threshold iterations per cycle for the daily stress benchmark. Keep a change only when weekly benchmark stays pass, expectancy stays positive, drawdown stays safe, trade count does not collapse, and daily return improves.
+This cheap path runs XGBoost plus Ridge first and skips recurrent/fusion heavy branches unless CUDA is available and explicitly requested. Weekly benchmark is the primary shipping gate. Daily stress is an informational stretch check, not a hard release gate, because bounded safe tuning showed the 1.0 daily target can collapse trade coverage and expectancy on the current same-path metric. Do not repeat daily-stress tuning loops after `reports/daily_stress_iteration_log.md` shows the safe loop is exhausted.
 
 If CUDA is not available and memory is low, do not brute-force CPU recurrent work. Keep the latest completed benchmark truth and report the skip honestly.
 
@@ -231,7 +231,7 @@ If CUDA is not available and memory is low, do not brute-force CPU recurrent wor
 - Alpaca is skipped: set paper credentials in `.env`; keep `LIVE_TRADING=false`.
 - IBKR is skipped: start TWS/Gateway in paper mode and set host/port/account values.
 - No trade idea generated: model signal may be weak, risk gate may reject it, or data may be unavailable.
-- Daily stress fails: this is allowed as an honest optional stress result; do not relabel it as pass unless a fresh run crosses the target.
+- Daily stress fails: this is an honest informational stretch result; weekly remains the primary benchmark gate. Do not relabel daily stress as pass unless a fresh run crosses the target without collapsing trade count, expectancy, or drawdown guardrails.
 
 ## Reports
 
