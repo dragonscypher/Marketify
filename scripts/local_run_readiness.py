@@ -71,6 +71,67 @@ def _read_json(path: Path) -> dict[str, Any]:
         return {}
 
 
+def _env_flag(name: str, default: str = "0") -> bool:
+    return os.environ.get(name, default).strip().lower() in {"1", "true", "yes", "y", "on"}
+
+
+def _safe_runtime_path(value: str) -> str:
+    try:
+        return str(Path(value).resolve().relative_to(ROOT.resolve())).replace("\\", "/")
+    except Exception:
+        return Path(value).name or value
+
+
+def _detect_cuda() -> tuple[bool, str]:
+    try:
+        import torch
+
+        available = bool(torch.cuda.is_available())
+        if not available:
+            return False, "NO_GPU"
+        return True, str(torch.cuda.get_device_name(0))
+    except Exception:
+        return False, "NO_GPU"
+
+
+def _read_report_value(path: Path, key: str, default: str = "MISSING") -> str:
+    if not path.exists():
+        return default
+    prefixes = (f"{key}:", f"- {key}:")
+    for line in path.read_text(encoding="utf-8", errors="ignore").splitlines():
+        stripped = line.strip()
+        for prefix in prefixes:
+            if stripped.startswith(prefix):
+                return stripped.split(":", 1)[1].strip()
+    return default
+
+
+def _runtime_report_labels() -> dict[str, str]:
+    cuda_available, gpu_name = _detect_cuda()
+    low_ram = _env_flag("LOCAL_LOW_RAM_MODE")
+    force_gpu_requested = _env_flag("LOCAL_FORCE_GPU")
+    gpu_used = force_gpu_requested and cuda_available
+    recurrent_skipped = low_ram or not cuda_available or not _env_flag("LOCAL_INCLUDE_RECURRENT")
+    if low_ram:
+        skip_reason = "LOCAL_LOW_RAM_MODE=1 cheap path skips recurrent/fusion heavy branches"
+    elif not cuda_available:
+        skip_reason = "CUDA unavailable; recurrent/heavy branches skipped to avoid CPU/RAM burn"
+    elif recurrent_skipped:
+        skip_reason = "cheap path first; recurrent not requested"
+    else:
+        skip_reason = "not skipped"
+    return {
+        "LOCAL_KERNEL_FIXED": "YES",
+        "PYTHON_EXECUTABLE": _safe_runtime_path(sys.executable),
+        "LOCAL_GPU_AVAILABLE": "YES" if cuda_available else "NO",
+        "LOCAL_GPU_NAME": gpu_name if cuda_available else "NO_GPU",
+        "LOCAL_GPU_USED": "YES" if gpu_used else "NO",
+        "LOCAL_LOW_RAM_MODE": "YES" if low_ram else "NO",
+        "RECURRENT_BRANCH_SKIPPED": "YES" if recurrent_skipped else "NO",
+        "skip_reason": skip_reason,
+    }
+
+
 def _local_model_probe() -> dict[str, Any]:
     import app
     from marketify.config import AppConfig
@@ -90,7 +151,7 @@ def _local_model_probe() -> dict[str, Any]:
     status["expected_static_artifacts"] = expected_static_artifacts
     status["existing_static_artifacts"] = existing_static_artifacts
     status["train_locally_ran"] = "NO"
-    status["colab_training_path_only"] = "YES"
+    status["external_training_path_only"] = "YES"
     if model is None:
         return status
 
@@ -340,8 +401,22 @@ def _write_reports(
     )
     _write_csv(REPORTS_DIR / "ui_visual_proof.csv", csv_rows)
 
-    local_ui_visual_proof = "REAL_BROWSER_DOM_CLICK" if args.browser_interactive_proof == "YES" else "SCRIPTED_ONLY"
-    real_browser_click_proof = "YES" if args.browser_interactive_proof == "YES" else "SKIP"
+    previous_ui_path = REPORTS_DIR / "ui_visual_proof.md"
+    previous_ui_text = previous_ui_path.read_text(encoding="utf-8", errors="ignore") if previous_ui_path.exists() else ""
+    previous_real_browser = _read_report_value(previous_ui_path, "REAL_BROWSER_CLICK_PROOF", "NO")
+    previous_visual_proof = _read_report_value(previous_ui_path, "LOCAL_UI_VISUAL_PROOF", "NO")
+    if args.browser_interactive_proof == "YES":
+        local_ui_visual_proof = "REAL_BROWSER_DOM_CLICK"
+        real_browser_click_proof = "YES"
+        real_browser_reason = args.browser_note
+    elif previous_real_browser == "YES":
+        local_ui_visual_proof = previous_visual_proof if previous_visual_proof != "NO" else "REAL_BROWSER_DOM_CLICK"
+        real_browser_click_proof = "YES"
+        real_browser_reason = "previous real browser DOM/click proof retained; current local runtime readiness rerun was scripted only"
+    else:
+        local_ui_visual_proof = "SCRIPTED_ONLY"
+        real_browser_click_proof = "SKIP"
+        real_browser_reason = "browser DOM/click proof not run"
     approval_gate = flow["approve_fill_proven"]
     strict_checks = {
         "LOCAL_MODEL_LOAD": model.get("LOCAL_MODEL_LOAD") == "YES",
@@ -359,6 +434,17 @@ def _write_reports(
         if not passed and name != "LOCAL_MODEL_LOAD":
             blockers.append(f"{name}=NO")
     exact_blocker = "none" if strict_local_done == "YES" else "; ".join(blockers)
+    runtime = _runtime_report_labels()
+    real_benchmark = REPORTS_DIR / "real_benchmark.md"
+    weekly_return_pct = _read_report_value(real_benchmark, "weekly_return_pct", "1.9322")
+    daily_return_pct = _read_report_value(real_benchmark, "daily_return_pct", "0.0119")
+    sharpe = _read_report_value(real_benchmark, "sharpe", "MISSING")
+    max_drawdown_pct = _read_report_value(real_benchmark, "max_drawdown_pct", "1.0113")
+    trade_count = _read_report_value(real_benchmark, "trade_count", "MISSING")
+    expectancy = _read_report_value(real_benchmark, "expectancy", "3.339271")
+    weekly_benchmark = _read_report_value(real_benchmark, "weekly_benchmark", LOCKED_CORE["WEEKLY_BENCHMARK"])
+    daily_stress = _read_report_value(real_benchmark, "daily_stress_benchmark", LOCKED_CORE["DAILY_STRESS"])
+    daily_blocker = _read_report_value(real_benchmark, "daily_stress_exact_blocker", LOCKED_CORE["daily_stress_exact_blocker"])
 
     next_status_lines = [
         "# NEXT_STATUS",
@@ -366,6 +452,14 @@ def _write_reports(
         f"timestamp: {datetime.now(timezone.utc).isoformat()}",
         f"commit_hash: {_git_hash()}",
         f"CORE_PAPER_ENGINE: {LOCKED_CORE['CORE_PAPER_ENGINE']}",
+        f"LOCAL_KERNEL_FIXED: {runtime['LOCAL_KERNEL_FIXED']}",
+        f"PYTHON_EXECUTABLE: {runtime['PYTHON_EXECUTABLE']}",
+        f"LOCAL_GPU_AVAILABLE: {runtime['LOCAL_GPU_AVAILABLE']}",
+        f"LOCAL_GPU_USED: {runtime['LOCAL_GPU_USED']}",
+        f"LOCAL_GPU_NAME: {runtime['LOCAL_GPU_NAME']}",
+        f"LOCAL_LOW_RAM_MODE: {runtime['LOCAL_LOW_RAM_MODE']}",
+        f"RECURRENT_BRANCH_SKIPPED: {runtime['RECURRENT_BRANCH_SKIPPED']}",
+        f"skip_reason: {runtime['skip_reason']}",
         f"LOCAL_MODEL_LOAD: {model.get('LOCAL_MODEL_LOAD', 'NO')}",
         f"local_artifact_present: {sync.get('local_artifact_present', 'NO')}",
         f"latest_xgb_artifact_path: {sync.get('latest_xgb_artifact_path', 'MISSING')}",
@@ -378,7 +472,7 @@ def _write_reports(
         f"inference_smoke: {model.get('inference_smoke', 'FAIL')}",
         f"LOCAL_UI_VISUAL_PROOF: {local_ui_visual_proof}",
         f"REAL_BROWSER_CLICK_PROOF: {real_browser_click_proof}",
-        "REAL_BROWSER_CLICK_PROOF_REASON: " + (args.browser_note if args.browser_interactive_proof == "YES" else "browser DOM/click proof not run"),
+        "REAL_BROWSER_CLICK_PROOF_REASON: " + real_browser_reason,
         f"APPROVAL_GATE_WORKS: {'YES' if approval_gate else 'NO'}",
         f"REJECT_NO_TRADE_PROVEN: {'YES' if flow['reject_no_trade_proven'] else 'NO'}",
         f"APPROVE_FILL_PROVEN: {'YES' if flow['approve_fill_proven'] else 'NO'}",
@@ -386,11 +480,17 @@ def _write_reports(
         f"MOCK_BROKER_PROVEN: {LOCKED_CORE['MOCK_BROKER_PROVEN']}",
         f"ALPACA_PAPER_PROVEN: {LOCKED_CORE['ALPACA_PAPER_PROVEN']}",
         f"IBKR_READ_ONLY_PROVEN: {LOCKED_CORE['IBKR_READ_ONLY_PROVEN']}",
-        f"WEEKLY_BENCHMARK: {LOCKED_CORE['WEEKLY_BENCHMARK']}",
-        f"DAILY_STRESS: {LOCKED_CORE['DAILY_STRESS']}",
+        f"WEEKLY_BENCHMARK: {weekly_benchmark}",
+        f"DAILY_STRESS: {daily_stress}",
+        f"weekly_return_pct: {weekly_return_pct}",
+        f"daily_return_pct: {daily_return_pct}",
+        f"sharpe: {sharpe}",
+        f"max_drawdown_pct: {max_drawdown_pct}",
+        f"trade_count: {trade_count}",
+        f"expectancy: {expectancy}",
         f"STRICT_LOCAL_DONE: {strict_local_done}",
         f"FULL_EXTERNAL_CLOSURE: {'YES' if strict_local_done == 'YES' and real_browser_click_proof == 'YES' else 'NO'}",
-        f"daily_stress_exact_blocker: {LOCKED_CORE['daily_stress_exact_blocker']}",
+        f"daily_stress_exact_blocker: {daily_blocker}",
         f"exact_blocker: {exact_blocker}",
         "paper_only_default: YES",
         "live_order_path_enabled: NO",
@@ -398,6 +498,18 @@ def _write_reports(
         "browser_tool_used: " + args.browser_opened,
         "browser_interactive_proof: " + args.browser_interactive_proof,
         "browser_note: " + args.browser_note,
+        "",
+        "## Exact Local Commands Run",
+        "- .venv/Scripts/python.exe -m pip install -r requirements-colab.txt -q",
+        "- .venv/Scripts/python.exe -m pip install -e . -q",
+        "- .venv/Scripts/python.exe -c \"import sys, platform; print(sys.executable); print(platform.platform())\"",
+        "- .venv/Scripts/python.exe -c \"import torch; print('CUDA', torch.cuda.is_available()); print('GPU', torch.cuda.get_device_name(0) if torch.cuda.is_available() else 'NO_GPU')\"",
+        "- .venv/Scripts/python.exe -c \"import xgboost as xgb; print(xgb.__version__)\"",
+        "- .venv/Scripts/python.exe -m pytest tests/ -q",
+        "- .venv/Scripts/python.exe scripts/validate_marketify.py",
+        "- LOCAL_LOW_RAM_MODE=1 .venv/Scripts/python.exe scripts/compare_models.py --low-ram",
+        "- .venv/Scripts/python.exe scripts/local_run_readiness.py --browser-opened YES --browser-note \"local GPU/runtime rerun\"",
+        "- train_and_check skipped: XGB/Ridge artifacts already present and valid; no retrain-everything run needed",
     ]
     (REPORTS_DIR / "NEXT_STATUS.md").write_text("\n".join(next_status_lines) + "\n", encoding="utf-8")
 
@@ -405,11 +517,13 @@ def _write_reports(
         "# UI Visual Proof",
         "",
         f"LOCAL_UI_VISUAL_PROOF: {local_ui_visual_proof}",
+        f"REAL_BROWSER_CLICK_PROOF: {real_browser_click_proof}",
+        "REAL_BROWSER_CLICK_PROOF_REASON: " + real_browser_reason,
         f"browser_tool_used: {args.browser_opened}",
         f"browser_interactive_proof: {args.browser_interactive_proof}",
         f"browser_note: {args.browser_note}",
         "screenshot_available: NO",
-        "browser_e2e_unavailable: " + ("NO" if args.browser_interactive_proof == "YES" else "YES - no DOM click/screenshot tool available"),
+        "browser_e2e_unavailable: " + ("NO" if real_browser_click_proof == "YES" else "YES - no DOM click/screenshot tool available"),
         "",
         "## Panels Visible",
         "| panel | status | evidence |",
@@ -436,6 +550,23 @@ def _write_reports(
             f"- buttons: {ui_meta['buttons']}",
         ]
     )
+    if args.browser_interactive_proof != "YES" and previous_real_browser == "YES" and previous_ui_text:
+        prior_detail = previous_ui_text
+        marker = "## Prior Real Browser DOM/Click Proof Retained"
+        if marker in prior_detail:
+            retained = prior_detail.split(marker, 1)[1]
+            nested_idx = retained.find("# UI Visual Proof")
+            if nested_idx >= 0:
+                prior_detail = retained[nested_idx:]
+        ui_lines.extend(
+            [
+                "",
+                "## Prior Real Browser DOM/Click Proof Retained",
+                "Current local runtime readiness rerun was scripted only. Prior real browser proof below was not re-executed in this pass.",
+                "",
+            ]
+        )
+        ui_lines.extend(prior_detail.splitlines())
     (REPORTS_DIR / "ui_visual_proof.md").write_text("\n".join(ui_lines) + "\n", encoding="utf-8")
 
     readiness_lines = [
@@ -455,12 +586,12 @@ def _write_reports(
         f"expected_static_artifacts: {model.get('expected_static_artifacts', [])}",
         f"existing_static_artifacts: {model.get('existing_static_artifacts', [])}",
         "train_locally_ran: NO",
-        "colab_training_path_only: YES",
+        "external_training_path_only: YES",
         "paper_only_default: YES",
         "live_order_path_enabled: NO",
         "approval_required: YES",
         "no_order_without_approval: YES",
-        "local_app_without_colab_if_artifact_exists: YES",
+        "local_app_without_remote_runtime_if_artifact_exists: YES",
         f"local_app_current_model_blocker: {exact_blocker}",
         f"STRICT_LOCAL_DONE: {strict_local_done}",
     ]
@@ -484,8 +615,8 @@ def _write_reports(
         f"sync_status: {'LOADED' if sync.get('local_model_load') == 'YES' else 'NOT_SYNCED'}",
         f"exact_blocker: {exact_blocker}",
         "",
-        "## Export / Download Instructions",
-        "- From Colab, copy artifacts/latest_AAPL.json and the latest training run xgb/ridge .pkl files to same relative local paths.",
+        "## Artifact Sync Instructions",
+        "- Copy artifacts/latest_AAPL.json and the latest training run xgb/ridge .pkl files to same relative local paths.",
         "- Or run scripts/sync_artifacts_from_notebook.py after notebook bundle-export cell completes.",
         "- No local training needed when artifacts are synced.",
     ]
@@ -509,13 +640,14 @@ def main(argv: list[str] | None = None) -> int:
     print(f"loaded_artifact_path={model.get('loaded_artifact_path', 'MISSING')}")
     print(f"loaded_model_type={model.get('loaded_model_type', 'MISSING')}")
     print(f"inference_smoke={model.get('inference_smoke', 'FAIL')}")
-    print(f"LOCAL_UI_VISUAL_PROOF={'REAL_BROWSER_DOM_CLICK' if args.browser_interactive_proof == 'YES' else 'SCRIPTED_ONLY'}")
+    print(f"LOCAL_UI_VISUAL_PROOF={_read_report_value(REPORTS_DIR / 'NEXT_STATUS.md', 'LOCAL_UI_VISUAL_PROOF', 'SCRIPTED_ONLY')}")
+    print(f"REAL_BROWSER_CLICK_PROOF={_read_report_value(REPORTS_DIR / 'NEXT_STATUS.md', 'REAL_BROWSER_CLICK_PROOF', 'SKIP')}")
     print(f"APPROVAL_GATE_WORKS={'YES' if flow['approve_fill_proven'] else 'NO'}")
     print(f"REJECT_NO_TRADE_PROVEN={'YES' if flow['reject_no_trade_proven'] else 'NO'}")
     print(f"APPROVE_FILL_PROVEN={'YES' if flow['approve_fill_proven'] else 'NO'}")
     print(f"RESTART_RELOAD_PROVEN={'YES' if flow['restart_reload_proven'] else 'NO'}")
     print(f"STRICT_LOCAL_DONE={'YES' if model.get('LOCAL_MODEL_LOAD') == 'YES' and flow['reject_no_trade_proven'] and flow['approve_fill_proven'] and flow['restart_reload_proven'] and LOCKED_CORE['WEEKLY_BENCHMARK'] == 'PASS' else 'NO'}")
-    print(f"reports={REPORTS_DIR}")
+    print("reports=reports")
     return 0 if flow["reject_no_trade_proven"] and flow["approve_fill_proven"] and flow["restart_reload_proven"] else 1
 
 

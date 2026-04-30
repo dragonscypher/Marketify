@@ -1,6 +1,6 @@
 # PII / GitHub Secrets Audit
 
-updated_at: 2026-04-29T16:05:00+00:00
+updated_at: 2026-04-30T00:48:00+00:00
 PII_GITHUB_AUDIT: FIXED
 cleanup_required: YES
 secret_rotation_required: NO
@@ -33,6 +33,8 @@ secret_rotation_required: NO
 - Removed tracked sync_payload.zip.
 - Removed duplicate/bulky research notebooks from tracked repo; kept archive README explaining source-of-truth rules.
 - Stripped colab_probe.ipynb outputs and execution counts.
+- Reduced colab_probe.ipynb to a local runtime probe and kept notebook cells output-free.
+- Added local low-RAM runtime reports using repo-relative paths only.
 - Updated scripts/local_run_readiness.py to write relative artifact paths.
 - Regenerated local readiness output with relative paths.
 

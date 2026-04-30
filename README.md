@@ -46,13 +46,53 @@ If the virtual environment is broken, use the repair script:
 powershell -ExecutionPolicy Bypass -File scripts/repair_local_venv.ps1
 ```
 
+## Select local Python, not a remote notebook kernel
+
+Use the local virtual environment for all terminal commands and notebooks.
+
+In VS Code:
+
+1. Open Command Palette.
+2. Run `Python: Select Interpreter`.
+3. Pick `.venv\Scripts\python.exe` from this repo.
+4. For notebooks, click the kernel picker and select the same `.venv` Python kernel.
+
+Verify before any benchmark run:
+
+```powershell
+.\.venv\Scripts\python.exe -c "import sys, platform; print(sys.executable); print(platform.platform())"
+```
+
+If the path is not this repo's `.venv\Scripts\python.exe`, stop and switch interpreters first.
+
 ## Detect GPU
 
 ```powershell
 .\.venv\Scripts\python.exe -c "import torch; print(torch.cuda.is_available()); print(torch.cuda.get_device_name(0) if torch.cuda.is_available() else 'NO_GPU')"
+.\.venv\Scripts\python.exe -c "import xgboost as xgb; print(xgb.__version__)"
 ```
 
 If CUDA is unavailable, skip optional heavy retraining. Validation, UI proof, broker skip-proof, and report hygiene still run locally.
+
+## Low-RAM local mode
+
+Use low-RAM mode for local benchmark work. It runs one stage at a time, uses single-worker XGBoost, uses `float32` prediction arrays where safe, skips recurrent branches on CPU, and avoids extra feature-ablation retraining.
+
+```powershell
+$env:LOCAL_LOW_RAM_MODE = "1"
+$env:OMP_NUM_THREADS = "1"
+$env:MKL_NUM_THREADS = "1"
+$env:OPENBLAS_NUM_THREADS = "1"
+$env:NUMEXPR_NUM_THREADS = "1"
+```
+
+Only set GPU forcing after CUDA is confirmed:
+
+```powershell
+$env:LOCAL_FORCE_GPU = "1"
+```
+
+Do not set `LOCAL_FORCE_GPU` when CUDA reports `False`.
 
 ## Run the UI
 
@@ -156,15 +196,21 @@ Run train-if-missing and artifact checks:
 Run same-path benchmark comparison:
 
 ```powershell
-.\.venv\Scripts\python.exe scripts/compare_models.py
+$env:LOCAL_LOW_RAM_MODE = "1"
+.\.venv\Scripts\python.exe scripts/compare_models.py --low-ram
 ```
 
-If CUDA is not available and memory is low, skip optional heavy daily-stress tuning. Keep the latest completed benchmark truth and report the skip honestly.
+This cheap path runs XGBoost plus Ridge first and skips recurrent/fusion heavy branches unless CUDA is available and explicitly requested. It may try up to five small gate-threshold iterations for the daily stress benchmark. Keep a change only when weekly benchmark stays pass, expectancy stays positive, drawdown stays safe, and daily return improves.
+
+If CUDA is not available and memory is low, do not brute-force CPU recurrent work. Keep the latest completed benchmark truth and report the skip honestly.
 
 ## Common troubleshooting
 
 - Missing local model: run `scripts/train_and_check.py` or sync the latest `artifacts/latest_<TICKER>.json` and model files.
 - `LOCAL_MODEL_LOAD=NO`: check that artifact paths in `artifacts/latest_<TICKER>.json` point to files that exist locally.
+- Wrong interpreter: re-run `Python: Select Interpreter`, choose `.venv\Scripts\python.exe`, then rerun the `sys.executable` check.
+- No GPU: keep `LOCAL_LOW_RAM_MODE=1`, leave `LOCAL_FORCE_GPU` unset, and skip recurrent/heavy branches.
+- Timeout or RAM pressure: stop the run, keep prior honest report values, and do not retry with larger CPU fanout.
 - Alpaca is skipped: set paper credentials in `.env`; keep `LIVE_TRADING=false`.
 - IBKR is skipped: start TWS/Gateway in paper mode and set host/port/account values.
 - No trade idea generated: model signal may be weak, risk gate may reject it, or data may be unavailable.

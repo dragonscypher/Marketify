@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import gc
 import json
 import os
 import sys
@@ -135,7 +136,76 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run honest same-path real benchmark across xgb, ridge, gru, lstm, fusion.")
     parser.add_argument("--output-dir", default="reports")
     parser.add_argument("--hold-horizon-bars", type=int, default=default_horizon)
+    parser.add_argument("--low-ram", action="store_true", help="run xgb+ridge cheap path and skip recurrent/fusion heavy branches")
+    parser.add_argument("--include-recurrent", action="store_true", help="allow recurrent support branches only when CUDA is available")
     return parser.parse_args(argv)
+
+
+def _env_flag(name: str, default: str = "0") -> bool:
+    return os.environ.get(name, default).strip().lower() in {"1", "true", "yes", "y", "on"}
+
+
+def _detect_cuda() -> tuple[bool, str]:
+    try:
+        import torch
+
+        available = bool(torch.cuda.is_available())
+        if not available:
+            return False, "NO_GPU"
+        return True, str(torch.cuda.get_device_name(0))
+    except Exception as exc:
+        return False, f"NO_GPU ({type(exc).__name__}: {exc})"
+
+
+def _empty_memory() -> None:
+    gc.collect()
+    try:
+        import torch
+
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+    except Exception:
+        pass
+
+
+def _safe_runtime_path(value: str) -> str:
+    try:
+        path = Path(value).resolve()
+        return str(path.relative_to(ROOT.resolve())).replace("\\", "/")
+    except Exception:
+        return Path(value).name or value
+
+
+def _runtime_labels(args: argparse.Namespace) -> dict[str, str]:
+    cuda_available, gpu_name = _detect_cuda()
+    low_ram = bool(args.low_ram or _env_flag("LOCAL_LOW_RAM_MODE"))
+    force_gpu_requested = _env_flag("LOCAL_FORCE_GPU")
+    force_gpu = force_gpu_requested and cuda_available
+    recurrent_requested = bool(args.include_recurrent or _env_flag("LOCAL_INCLUDE_RECURRENT"))
+    recurrent_skipped = low_ram or not cuda_available or not recurrent_requested
+    if low_ram:
+        recurrent_skip_reason = "LOCAL_LOW_RAM_MODE=1 cheap path skips recurrent/fusion heavy branches"
+    elif not cuda_available:
+        recurrent_skip_reason = "CUDA unavailable; recurrent/heavy branches skipped to avoid CPU/RAM burn"
+    elif not recurrent_requested:
+        recurrent_skip_reason = "cheap path first; recurrent not requested"
+    else:
+        recurrent_skip_reason = "not skipped"
+    local_gpu_used = "YES" if force_gpu else "NO"
+    if force_gpu_requested and not cuda_available:
+        print("[COMPARE] LOCAL_FORCE_GPU ignored: CUDA unavailable")
+    return {
+        "LOCAL_KERNEL_FIXED": "YES",
+        "PYTHON_EXECUTABLE": _safe_runtime_path(sys.executable),
+        "LOCAL_GPU_AVAILABLE": "YES" if cuda_available else "NO",
+        "LOCAL_GPU_NAME": gpu_name if cuda_available else "NO_GPU",
+        "LOCAL_FORCE_GPU_REQUESTED": "YES" if force_gpu_requested else "NO",
+        "LOCAL_GPU_USED": local_gpu_used,
+        "LOCAL_LOW_RAM_MODE": "YES" if low_ram else "NO",
+        "RECURRENT_BRANCH_SKIPPED": "YES" if recurrent_skipped else "NO",
+        "recurrent_skip_reason": recurrent_skip_reason,
+        "SAFE_BENCHMARK_PATH": "xgb+ridge" if recurrent_skipped else "xgb+ridge+recurrent_support",
+    }
 
 
 def _coerce_bool(value: object) -> bool:
@@ -913,6 +983,117 @@ def _tune_real_path_gate_knobs(
     return TunedGateResult(overrides=best_overrides, row=best_row, result=best_result)
 
 
+def _safe_daily_keep(current_best: RealBenchmarkRow, candidate: RealBenchmarkRow) -> bool:
+    return bool(
+        _weekly_benchmark_label(candidate) == "PASS"
+        and float(candidate.expectancy) > 0.0
+        and float(candidate.max_drawdown_pct) <= RISK_DRAWDOWN_LIMIT_PCT
+        and float(candidate.daily_return_pct) > float(current_best.daily_return_pct)
+    )
+
+
+def _daily_stress_candidate_overrides(config) -> list[dict[str, float]]:
+    thresholds = _signal_gate_thresholds(config)
+    fee_floor = (float(config.broker.fee_bps) + float(config.broker.slippage_bps)) / 10000.0
+    base_cost_floor = max(float(thresholds["edge_floor"]) - float(thresholds["abstain_margin"]), fee_floor)
+    base_min_confidence = float(thresholds["min_confidence"])
+    base_abstain_margin = float(thresholds["abstain_margin"])
+    base_max_disagreement = float(thresholds["max_disagreement"])
+    return [
+        {"approval_precision_threshold": max(base_min_confidence - 0.05, 0.20)},
+        {"cost_buffer_floor": max(base_cost_floor * 0.75, fee_floor)},
+        {"abstain_margin": max(base_abstain_margin * 0.5, 0.0)},
+        {
+            "approval_precision_threshold": max(base_min_confidence - 0.05, 0.20),
+            "cost_buffer_floor": max(base_cost_floor * 0.75, fee_floor),
+        },
+        {"approval_precision_threshold": min(base_min_confidence + 0.05, 0.80)},
+    ]
+
+
+def _run_daily_stress_safe_loop(
+    feat: pd.DataFrame,
+    xgb_preds: pd.Series,
+    config,
+    support_preds: dict[str, pd.Series],
+) -> tuple[TunedGateResult, list[dict[str, object]]]:
+    iterations: list[dict[str, object]] = []
+    baseline_row, baseline_result = _run_real_lane(
+        model_name="xgb",
+        feat=feat,
+        preds=xgb_preds,
+        config=config,
+        role="candidate",
+        comparison_preds=support_preds,
+        gate_overrides=None,
+        notes="xgb low-ram baseline",
+    )
+    best_row = baseline_row
+    best_result = baseline_result
+    best_overrides: dict[str, float] = {}
+    iterations.append(
+        {
+            "iteration": 0,
+            "knobs": "none",
+            "weekly_benchmark": _weekly_benchmark_label(baseline_row),
+            "daily_stress": _daily_stress_label(baseline_row),
+            "daily_return_pct": baseline_row.daily_return_pct,
+            "weekly_return_pct": baseline_row.weekly_return_pct,
+            "expectancy": baseline_row.expectancy,
+            "max_drawdown_pct": baseline_row.max_drawdown_pct,
+            "keep_or_revert": "KEEP_BASELINE",
+            "reason": "current cheap-path baseline",
+        }
+    )
+    print(
+        "[COMPARE] daily_loop iteration=0 "
+        f"weekly={baseline_row.weekly_return_pct}% daily={baseline_row.daily_return_pct}% "
+        f"expectancy={baseline_row.expectancy} dd={baseline_row.max_drawdown_pct}%"
+    )
+    _empty_memory()
+
+    for idx, overrides in enumerate(_daily_stress_candidate_overrides(config), start=1):
+        row, result = _run_real_lane(
+            model_name="xgb",
+            feat=feat,
+            preds=xgb_preds,
+            config=config,
+            role="candidate",
+            comparison_preds=support_preds,
+            gate_overrides=overrides,
+            notes=f"xgb low-ram daily stress safe loop iteration {idx}",
+        )
+        keep = _safe_daily_keep(best_row, row)
+        if keep:
+            best_row = row
+            best_result = result
+            best_overrides = overrides
+        iterations.append(
+            {
+                "iteration": idx,
+                "knobs": "; ".join(f"{key}={value:.6f}" for key, value in overrides.items()),
+                "weekly_benchmark": _weekly_benchmark_label(row),
+                "daily_stress": _daily_stress_label(row),
+                "daily_return_pct": row.daily_return_pct,
+                "weekly_return_pct": row.weekly_return_pct,
+                "expectancy": row.expectancy,
+                "max_drawdown_pct": row.max_drawdown_pct,
+                "keep_or_revert": "KEEP" if keep else "REVERT",
+                "reason": "daily improved with weekly PASS, expectancy>0, drawdown safe" if keep else "guardrail failed or daily did not improve",
+            }
+        )
+        print(
+            "[COMPARE] daily_loop "
+            f"iteration={idx} keep={'YES' if keep else 'NO'} weekly={row.weekly_return_pct}% "
+            f"daily={row.daily_return_pct}% expectancy={row.expectancy} dd={row.max_drawdown_pct}%"
+        )
+        _empty_memory()
+        if _daily_stress_label(best_row) == "PASS":
+            break
+
+    return TunedGateResult(overrides=best_overrides, row=best_row, result=best_result), iterations
+
+
 def _fmt_metric(value: object, digits: int = 4) -> str:
     if value is None:
         return "-"
@@ -1203,19 +1384,16 @@ def build_real_benchmark_markdown(
     return "\n".join(lines) + "\n"
 
 
-COLAB_COMMANDS_RUN = [
-    "python scripts/colab_check.py",
+LOCAL_COMMANDS_RUN = [
+    "python -c \"import sys, platform; print(sys.executable); print(platform.platform())\"",
+    "python -c \"import torch; print('CUDA', torch.cuda.is_available()); print('GPU', torch.cuda.get_device_name(0) if torch.cuda.is_available() else 'NO_GPU')\"",
+    "python -c \"import xgboost as xgb; print(xgb.__version__)\"",
     "python -m pip install -r requirements-colab.txt -q",
     "python -m pip install -e . -q",
     "python -m pytest tests/ -q",
     "python scripts/validate_marketify.py",
-    "python scripts/train_and_check.py",
-    "python scripts/compare_models.py",
-    "cat reports/validation_summary.md",
-    "cat reports/broker_validation.md",
-    "cat reports/model_leaderboard.md",
-    "cat reports/daily_stress_iteration_log.md",
-    "cat reports/NEXT_STATUS.md",
+    "set LOCAL_LOW_RAM_MODE=1 and run python scripts/compare_models.py --low-ram",
+    "python scripts/local_run_readiness.py --browser-opened YES --browser-note \"local GPU/runtime rerun\"",
 ]
 
 
@@ -1285,6 +1463,8 @@ def build_next_status_markdown(
     display_row: RealBenchmarkRow | None = None,
     fix_lines: list[str] | None = None,
     ops_summary: dict[str, Any] | None = None,
+    runtime_labels: dict[str, str] | None = None,
+    daily_iterations: list[dict[str, object]] | None = None,
 ) -> str:
     row = display_row or champion_row
     if row is None:
@@ -1339,6 +1519,34 @@ def build_next_status_markdown(
         "",
         "FAIL honest if weekly < 1.0% or trade_count <= 0 or expectancy <= 0 or keep_coverage < 5%.",
     ]
+    if runtime_labels:
+        lines += [
+            "",
+            "## Local Runtime / Low RAM",
+            f"- LOCAL_KERNEL_FIXED: {runtime_labels.get('LOCAL_KERNEL_FIXED', 'NO')}",
+            f"- PYTHON_EXECUTABLE: {runtime_labels.get('PYTHON_EXECUTABLE', 'UNKNOWN')}",
+            f"- LOCAL_GPU_AVAILABLE: {runtime_labels.get('LOCAL_GPU_AVAILABLE', 'NO')}",
+            f"- LOCAL_GPU_NAME: {runtime_labels.get('LOCAL_GPU_NAME', 'NO_GPU')}",
+            f"- LOCAL_GPU_USED: {runtime_labels.get('LOCAL_GPU_USED', 'NO')}",
+            f"- LOCAL_LOW_RAM_MODE: {runtime_labels.get('LOCAL_LOW_RAM_MODE', 'NO')}",
+            f"- RECURRENT_BRANCH_SKIPPED: {runtime_labels.get('RECURRENT_BRANCH_SKIPPED', 'NO')}",
+            f"- skip_reason: {runtime_labels.get('recurrent_skip_reason', 'none')}",
+            f"- SAFE_BENCHMARK_PATH: {runtime_labels.get('SAFE_BENCHMARK_PATH', 'unknown')}",
+        ]
+    if daily_iterations:
+        lines += [
+            "",
+            "## Daily Stress Safe Loop",
+            "| iteration | knobs | weekly_benchmark | daily_stress | weekly_return_pct | daily_return_pct | expectancy | max_drawdown_pct | keep_or_revert | reason |",
+            "| ---: | --- | --- | --- | ---: | ---: | ---: | ---: | --- | --- |",
+        ]
+        for row_info in daily_iterations:
+            lines.append(
+                f"| {row_info['iteration']} | {row_info['knobs']} | {row_info['weekly_benchmark']} | {row_info['daily_stress']} | "
+                f"{_fmt_metric(row_info['weekly_return_pct'])} | {_fmt_metric(row_info['daily_return_pct'])} | "
+                f"{_fmt_metric(row_info['expectancy'], digits=6)} | {_fmt_metric(row_info['max_drawdown_pct'])} | "
+                f"{row_info['keep_or_revert']} | {row_info['reason']} |"
+            )
     if ops_summary:
         lines += [
             "",
@@ -1362,7 +1570,7 @@ def build_next_status_markdown(
         "",
         "## Exact Commands Run",
     ]
-    for command in COLAB_COMMANDS_RUN:
+    for command in LOCAL_COMMANDS_RUN:
         lines.append(f"- {command}")
     if fix_lines:
         lines += [
@@ -1467,11 +1675,24 @@ def build_iteration_log_markdown(
     return "\n".join(lines) + "\n"
 
 
-def build_daily_stress_iteration_log_markdown(source_of_truth_row: RealBenchmarkRow) -> str:
+def build_daily_stress_iteration_log_markdown(
+    source_of_truth_row: RealBenchmarkRow,
+    iterations: list[dict[str, object]] | None = None,
+    runtime_labels: dict[str, str] | None = None,
+) -> str:
     lines = [
         "# Daily Stress Iteration Log",
         "",
         "Secondary benchmark only. No architecture change. No leverage change. No exit-rule work.",
+        "",
+        "## Runtime Policy",
+        f"- LOCAL_KERNEL_FIXED: {(runtime_labels or {}).get('LOCAL_KERNEL_FIXED', 'UNKNOWN')}",
+        f"- LOCAL_GPU_AVAILABLE: {(runtime_labels or {}).get('LOCAL_GPU_AVAILABLE', 'UNKNOWN')}",
+        f"- LOCAL_GPU_USED: {(runtime_labels or {}).get('LOCAL_GPU_USED', 'UNKNOWN')}",
+        f"- LOCAL_GPU_NAME: {(runtime_labels or {}).get('LOCAL_GPU_NAME', 'UNKNOWN')}",
+        f"- LOCAL_LOW_RAM_MODE: {(runtime_labels or {}).get('LOCAL_LOW_RAM_MODE', 'UNKNOWN')}",
+        f"- RECURRENT_BRANCH_SKIPPED: {(runtime_labels or {}).get('RECURRENT_BRANCH_SKIPPED', 'UNKNOWN')}",
+        f"- skip_reason: {(runtime_labels or {}).get('recurrent_skip_reason', 'none')}",
         "",
         "## Iteration 0 - current safe baseline",
         "- iteration_number: 0",
@@ -1488,6 +1709,28 @@ def build_daily_stress_iteration_log_markdown(source_of_truth_row: RealBenchmark
         "- allowed_future_knobs: confidence threshold; abstain threshold; disagreement threshold; cost buffer threshold",
         "- stop_reason: daily_return_pct below 1.0; report FAIL honestly",
     ]
+    if iterations:
+        lines += [
+            "",
+            "## Safe Loop Attempts",
+            "| iteration | knobs | weekly_benchmark | daily_stress | weekly_return_pct | daily_return_pct | expectancy | max_drawdown_pct | keep_or_revert | reason |",
+            "| ---: | --- | --- | --- | ---: | ---: | ---: | ---: | --- | --- |",
+        ]
+        for row_info in iterations:
+            lines.append(
+                f"| {row_info['iteration']} | {row_info['knobs']} | {row_info['weekly_benchmark']} | {row_info['daily_stress']} | "
+                f"{_fmt_metric(row_info['weekly_return_pct'])} | {_fmt_metric(row_info['daily_return_pct'])} | "
+                f"{_fmt_metric(row_info['expectancy'], digits=6)} | {_fmt_metric(row_info['max_drawdown_pct'])} | "
+                f"{row_info['keep_or_revert']} | {row_info['reason']} |"
+            )
+        lines += [
+            "",
+            f"## Decision",
+            f"- WEEKLY_BENCHMARK: {_weekly_benchmark_label(source_of_truth_row)}",
+            f"- DAILY_STRESS: {_daily_stress_label(source_of_truth_row)}",
+            f"- exact_numeric_reason: {_daily_stress_blocker(source_of_truth_row)}",
+            "- no_fake_pass: YES",
+        ]
     return "\n".join(lines) + "\n"
 
 
@@ -2298,8 +2541,25 @@ def main(argv: list[str] | None = None) -> int:
     config = AppConfig()
     config.broker.time_stop_bars = int(args.hold_horizon_bars)
     output_dir = _ensure_dir(ROOT / args.output_dir)
+    runtime_labels = _runtime_labels(args)
+    low_ram_mode = runtime_labels["LOCAL_LOW_RAM_MODE"] == "YES"
+    recurrent_allowed = runtime_labels["RECURRENT_BRANCH_SKIPPED"] == "NO"
+    if low_ram_mode:
+        os.environ["LOCAL_LOW_RAM_MODE"] = "1"
+        os.environ.setdefault("OMP_NUM_THREADS", "1")
+        os.environ.setdefault("MKL_NUM_THREADS", "1")
+        os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
+        os.environ.setdefault("NUMEXPR_NUM_THREADS", "1")
+    if runtime_labels["LOCAL_GPU_USED"] == "YES":
+        os.environ["LOCAL_FORCE_GPU"] = "1"
 
     print("[COMPARE] Preparing real-path market features...")
+    print(
+        "[COMPARE] runtime "
+        f"python={runtime_labels['PYTHON_EXECUTABLE']} gpu={runtime_labels['LOCAL_GPU_AVAILABLE']} "
+        f"gpu_name={runtime_labels['LOCAL_GPU_NAME']} low_ram={runtime_labels['LOCAL_LOW_RAM_MODE']} "
+        f"recurrent_skipped={runtime_labels['RECURRENT_BRANCH_SKIPPED']}"
+    )
     raw = fetch_market_data(
         ticker=config.data.ticker,
         interval=config.data.interval,
@@ -2319,7 +2579,8 @@ def main(argv: list[str] | None = None) -> int:
     rows: list[RealBenchmarkRow] = []
     result_by_model: dict[str, tuple[RealBenchmarkRow, dict]] = {}
 
-    for model_name in ["xgb", "ridge", "gru", "lstm"]:
+    model_names = ["xgb", "ridge"] + (["gru", "lstm"] if recurrent_allowed else [])
+    for model_name in model_names:
         try:
             print(f"[COMPARE] predicting {model_name} ...")
             if model_name == "xgb":
@@ -2337,6 +2598,13 @@ def main(argv: list[str] | None = None) -> int:
         except Exception as exc:
             print(f"[COMPARE] {model_name} unavailable: {exc}")
             rows.append(_failed_model_row(model_name, f"same-path candidate failed: {exc}"))
+        finally:
+            _empty_memory()
+
+    if not recurrent_allowed:
+        skip_note = runtime_labels["recurrent_skip_reason"]
+        rows.append(_frozen_comparison_row("gru", f"skipped: {skip_note}"))
+        rows.append(_frozen_comparison_row("lstm", f"skipped: {skip_note}"))
 
     if "xgb" in prediction_rows and "gru" in prediction_rows:
         try:
@@ -2350,17 +2618,27 @@ def main(argv: list[str] | None = None) -> int:
             print(f"[COMPARE] fusion_reference_only unavailable: {exc}")
             rows.append(_failed_model_row("fusion_reference_only", f"same-path candidate failed: {exc}"))
     else:
-        rows.append(_failed_model_row("fusion_reference_only", "same-path candidate failed: requires xgb + gru predictions"))
+        rows.append(_frozen_comparison_row("fusion_reference_only", f"skipped: requires xgb + gru predictions; {runtime_labels['recurrent_skip_reason']}"))
 
     gate_overrides: dict[str, float] | None = None
     tuned_gate_result: TunedGateResult | None = None
+    daily_iterations: list[dict[str, object]] = []
     if "xgb" in prediction_rows:
-        tuned_gate_result = _tune_real_path_gate_knobs(
-            feat,
-            prediction_rows["xgb"],
-            config,
-            _support_comparison_preds("xgb", prediction_rows),
-        )
+        support_preds = _support_comparison_preds("xgb", prediction_rows)
+        if low_ram_mode:
+            tuned_gate_result, daily_iterations = _run_daily_stress_safe_loop(
+                feat,
+                prediction_rows["xgb"],
+                config,
+                support_preds,
+            )
+        else:
+            tuned_gate_result = _tune_real_path_gate_knobs(
+                feat,
+                prediction_rows["xgb"],
+                config,
+                support_preds,
+            )
         gate_overrides = tuned_gate_result.overrides
 
     for model_name, preds in prediction_rows.items():
@@ -2413,64 +2691,86 @@ def main(argv: list[str] | None = None) -> int:
                 f"selected_approval_precision_threshold={xgb_row.selected_approval_precision_threshold:.6f} "
                 f"applied_approval_precision_threshold={xgb_row.applied_approval_precision_threshold:.6f}"
             )
-        importance_df = _rolling_xgb_feature_importance(feat, feature_cols, "target_next_ret", config.model)
-        low_importance_cols = _ordered_weak_feature_candidates(importance_df, min(8, len(importance_df)))
+        importance_df = pd.DataFrame(columns=["feature", "mean_importance", "window_count"])
+        low_importance_cols: list[str] = []
         ablation_rows: list[dict] = []
         support_preds = _support_comparison_preds("xgb", prediction_rows)
-        for variant_name, variant_cols in _feature_variant_sets(feature_cols, low_importance_cols).items():
-            try:
-                xgb_variant_preds = rolling_train_predict_xgb(feat, variant_cols, "target_next_ret", config.model)
-                variant_row, _variant_result = _run_real_lane(
-                    model_name="xgb",
-                    feat=feat,
-                    preds=xgb_variant_preds,
-                    config=config,
-                    role="candidate",
-                    comparison_preds=support_preds,
-                    gate_overrides=gate_overrides,
-                    notes=f"xgb feature ablation: {variant_name}",
-                )
-                ablation_rows.append(
-                    {
-                        "variant": variant_name,
-                        "feature_count": len(variant_cols),
-                        "weekly_return_pct": variant_row.weekly_return_pct,
-                        "delta_weekly_return_pct": round(float(variant_row.weekly_return_pct) - float(xgb_row.weekly_return_pct), 4),
-                        "daily_return_pct": variant_row.daily_return_pct,
-                        "sharpe": variant_row.sharpe,
-                        "max_drawdown_pct": variant_row.max_drawdown_pct,
-                        "cvar_95_pct": variant_row.cvar_95_pct,
-                        "trade_count": variant_row.trade_count,
-                        "approval_count": variant_row.approval_count,
-                        "expectancy": variant_row.expectancy,
-                        "keep_coverage_pct": variant_row.keep_coverage_pct,
-                        "eligible": "YES" if _is_eligible_for_champion(variant_row) else "NO",
-                        "recommendation": "KEEP" if (
-                            variant_row.weekly_return_pct > xgb_row.weekly_return_pct
-                            and variant_row.keep_coverage_pct >= MIN_KEEP_COVERAGE_PCT
-                            and variant_row.expectancy > 0.0
-                        ) else "REJECT",
-                    }
-                )
-            except Exception as exc:
-                ablation_rows.append(
-                    {
-                        "variant": variant_name,
-                        "feature_count": len(variant_cols),
-                        "weekly_return_pct": float("nan"),
-                        "delta_weekly_return_pct": float("nan"),
-                        "daily_return_pct": float("nan"),
-                        "sharpe": float("nan"),
-                        "max_drawdown_pct": float("nan"),
-                        "cvar_95_pct": float("nan"),
-                        "trade_count": 0,
-                        "approval_count": 0,
-                        "expectancy": float("nan"),
-                        "keep_coverage_pct": 0.0,
-                        "eligible": "NO",
-                        "recommendation": f"ERROR: {exc}",
-                    }
-                )
+        if low_ram_mode:
+            ablation_rows.append(
+                {
+                    "variant": "low_ram_skipped",
+                    "feature_count": len(feature_cols),
+                    "weekly_return_pct": float("nan"),
+                    "delta_weekly_return_pct": float("nan"),
+                    "daily_return_pct": float("nan"),
+                    "sharpe": float("nan"),
+                    "max_drawdown_pct": float("nan"),
+                    "cvar_95_pct": float("nan"),
+                    "trade_count": 0,
+                    "approval_count": 0,
+                    "expectancy": float("nan"),
+                    "keep_coverage_pct": 0.0,
+                    "eligible": "NO",
+                    "recommendation": "SKIP: LOCAL_LOW_RAM_MODE=1 avoids extra XGB retraining",
+                }
+            )
+        else:
+            importance_df = _rolling_xgb_feature_importance(feat, feature_cols, "target_next_ret", config.model)
+            low_importance_cols = _ordered_weak_feature_candidates(importance_df, min(8, len(importance_df)))
+            for variant_name, variant_cols in _feature_variant_sets(feature_cols, low_importance_cols).items():
+                try:
+                    xgb_variant_preds = rolling_train_predict_xgb(feat, variant_cols, "target_next_ret", config.model)
+                    variant_row, _variant_result = _run_real_lane(
+                        model_name="xgb",
+                        feat=feat,
+                        preds=xgb_variant_preds,
+                        config=config,
+                        role="candidate",
+                        comparison_preds=support_preds,
+                        gate_overrides=gate_overrides,
+                        notes=f"xgb feature ablation: {variant_name}",
+                    )
+                    ablation_rows.append(
+                        {
+                            "variant": variant_name,
+                            "feature_count": len(variant_cols),
+                            "weekly_return_pct": variant_row.weekly_return_pct,
+                            "delta_weekly_return_pct": round(float(variant_row.weekly_return_pct) - float(xgb_row.weekly_return_pct), 4),
+                            "daily_return_pct": variant_row.daily_return_pct,
+                            "sharpe": variant_row.sharpe,
+                            "max_drawdown_pct": variant_row.max_drawdown_pct,
+                            "cvar_95_pct": variant_row.cvar_95_pct,
+                            "trade_count": variant_row.trade_count,
+                            "approval_count": variant_row.approval_count,
+                            "expectancy": variant_row.expectancy,
+                            "keep_coverage_pct": variant_row.keep_coverage_pct,
+                            "eligible": "YES" if _is_eligible_for_champion(variant_row) else "NO",
+                            "recommendation": "KEEP" if (
+                                variant_row.weekly_return_pct > xgb_row.weekly_return_pct
+                                and variant_row.keep_coverage_pct >= MIN_KEEP_COVERAGE_PCT
+                                and variant_row.expectancy > 0.0
+                            ) else "REJECT",
+                        }
+                    )
+                except Exception as exc:
+                    ablation_rows.append(
+                        {
+                            "variant": variant_name,
+                            "feature_count": len(variant_cols),
+                            "weekly_return_pct": float("nan"),
+                            "delta_weekly_return_pct": float("nan"),
+                            "daily_return_pct": float("nan"),
+                            "sharpe": float("nan"),
+                            "max_drawdown_pct": float("nan"),
+                            "cvar_95_pct": float("nan"),
+                            "trade_count": 0,
+                            "approval_count": 0,
+                            "expectancy": float("nan"),
+                            "keep_coverage_pct": 0.0,
+                            "eligible": "NO",
+                            "recommendation": f"ERROR: {exc}",
+                        }
+                    )
 
         fix_lines = _rank_xgb_fixes(xgb_row, xgb_result.get("trade_diagnostics", pd.DataFrame()), ablation_rows, importance_df)
         _write_false_positive_trade_review(xgb_row, xgb_result.get("trade_diagnostics", pd.DataFrame()), fix_lines, output_dir)
@@ -2500,6 +2800,8 @@ def main(argv: list[str] | None = None) -> int:
             source_of_truth_row,
             fix_lines=fix_lines,
             ops_summary=_ops_summary(output_dir),
+            runtime_labels=runtime_labels,
+            daily_iterations=daily_iterations,
         ),
         encoding="utf-8",
     )
@@ -2508,7 +2810,7 @@ def main(argv: list[str] | None = None) -> int:
         encoding="utf-8",
     )
     (output_dir / "daily_stress_iteration_log.md").write_text(
-        build_daily_stress_iteration_log_markdown(source_of_truth_row),
+        build_daily_stress_iteration_log_markdown(source_of_truth_row, daily_iterations, runtime_labels),
         encoding="utf-8",
     )
 

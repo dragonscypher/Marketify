@@ -132,8 +132,8 @@ def _write_artifact_reports(
         "models": models,
         "leaderboard": leaderboard,
         "export_download_instructions": [
-            f"Copy {_rel(pointer_path)} from Colab artifacts directory to same relative path in local repo.",
-            f"Copy {_rel(latest_xgb)} and {_rel(latest_ridge)} from Colab to same relative paths in local repo.",
+            f"Copy {_rel(pointer_path)} from the artifact source directory to same relative path in local repo.",
+            f"Copy {_rel(latest_xgb)} and {_rel(latest_ridge)} to same relative paths in local repo.",
             f"Alternative: copy static artifacts/xgb_{ticker}.pkl and artifacts/ridge_{ticker}.pkl into local artifacts/.",
             "After sync, run: python scripts/local_run_readiness.py --browser-opened YES --browser-note \"local app opened; click proof unavailable\".",
         ],

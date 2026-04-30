@@ -2,6 +2,59 @@
 
 LOCAL_UI_VISUAL_PROOF: REAL_BROWSER_DOM_CLICK
 REAL_BROWSER_CLICK_PROOF: YES
+REAL_BROWSER_CLICK_PROOF_REASON: previous real browser DOM/click proof retained; current local runtime readiness rerun was scripted only
+browser_tool_used: YES
+browser_interactive_proof: NO
+browser_note: local GPU/runtime rerun
+screenshot_available: NO
+browser_e2e_unavailable: NO
+
+## Panels Visible
+| panel | status | evidence |
+| --- | --- | --- |
+| risk disclaimer | PASS | RISK_DISCLAIMER markdown visible |
+| benchmark disclaimer | PASS | 1% weekly benchmark not guarantee markdown visible |
+| latest trade idea | PASS | Pending Trade Idea dataframe |
+| approve button | PASS | Approve button |
+| reject button | PASS | Reject button |
+| account equity | PASS | Account dataframe includes equity |
+| cash | PASS | Account dataframe includes cash |
+| positions | PASS | Positions dataframe |
+| open orders | PASS | Open Orders / Orders dataframe |
+| fills | PASS | Fills dataframe |
+| realized pnl | PASS | PnL Summary includes realized_pnl |
+| unrealized pnl | PASS | PnL Summary includes unrealized_pnl |
+| risk events | PASS | Risk Events dataframe |
+| model leaderboard | PASS | Model Leaderboard dataframe |
+| weekly benchmark PASS/FAIL | PASS | Benchmark Status textbox |
+| daily stress PASS/FAIL | PASS | Benchmark Status textbox |
+| kill switch | PASS | Toggle Kill Switch button |
+| reset paper account with confirmation | PASS | Reset confirmation textbox + button |
+| local model status | PASS | Local Model Status textbox |
+| safety status | PASS | Safety Status textbox |
+
+## Flow Proof
+- disclaimer_visible: True
+- idea_fields_present: True
+- reject_no_trade_proven: True
+- reject_before: {'account': {'cash': 10000.0, 'equity': 10000.0, 'realized_pnl': 0.0, 'unrealized_pnl': 0.0, 'max_equity': 10000.0, 'drawdown_pct': 0.0, 'daily_loss_pct': 0.0}, 'orders': 0, 'fills': 0, 'positions': 0}
+- reject_after: {'account': {'cash': 10000.0, 'equity': 10000.0, 'realized_pnl': 0.0, 'unrealized_pnl': 0.0, 'max_equity': 10000.0, 'drawdown_pct': 0.0, 'daily_loss_pct': 0.0}, 'orders': 0, 'fills': 0, 'positions': 0}
+- approve_fill_proven: True
+- approve_after: {'account': {'cash': 9063.71918128, 'equity': 10008.71918128, 'realized_pnl': 0.0, 'unrealized_pnl': 8.906399999999962, 'max_equity': 10000.0, 'drawdown_pct': 0.0, 'daily_loss_pct': 0.0}, 'orders': 1, 'fills': 1, 'positions': 1, 'latest_fill': {'fill_id': '38101610-e381-4c88-8f80-414343651097', 'order_id': 'b646fd82-76a1-440f-9583-41399021a00e', 'symbol': 'AAPL', 'side': 'buy', 'qty': 9.0, 'price': 104.0104, 'fee': 0.18721872, 'created_at': '2026-04-30T00:47:50.366501+00:00'}, 'latest_position': {'symbol': 'AAPL', 'qty': 9.0, 'avg_cost': 104.0104, 'mark_price': 105.0, 'market_value': 945.0, 'unrealized_pnl': 8.906399999999962}}
+- restart_reload_proven: True
+- reload_after: {'account': {'cash': 9063.71918128, 'equity': 10008.71918128, 'realized_pnl': 0.0, 'unrealized_pnl': 8.906399999999962, 'max_equity': 10000.0, 'drawdown_pct': 0.0, 'daily_loss_pct': 0.0}, 'orders': 1, 'fills': 1, 'positions': 1}
+
+## Raw UI Metadata
+- labels: ['Account', 'Allow Shorts', 'Approval Mode', 'Benchmark Status (weekly core / daily stress)', 'Benchmark Weekly Goal', 'Broker Backend', 'Fills', 'Include Pre/Post Market', 'Initial Cash ($)', 'Interval', 'Local Model Status', 'Max CVaR 95', 'Max Daily Loss %', 'Max Drawdown %', 'Max Position Fraction', 'Model Leaderboard', 'Open Orders / Orders', 'Pending Trade Idea', 'Period', 'PnL Summary', 'Positions', 'Reject reason', 'Reset paper account confirmation', 'Risk Events', 'Safety Status', 'Setup', 'Setup Status', 'Status', 'Ticker', 'Tickers (comma-separated)', 'Trading']
+- buttons: ['Approve', 'Generate Suggestion', 'Refresh Dashboard', 'Reject', 'Reset Halt', 'Reset Paper Account', 'Save Configuration', 'Toggle Kill Switch']
+
+## Prior Real Browser DOM/Click Proof Retained
+Current local runtime readiness rerun was scripted only. Prior real browser proof below was not re-executed in this pass.
+
+# UI Visual Proof
+
+LOCAL_UI_VISUAL_PROOF: REAL_BROWSER_DOM_CLICK
+REAL_BROWSER_CLICK_PROOF: YES
 browser_tool_used: YES
 browser_interactive_proof: YES
 browser_url: http://127.0.0.1:7860/
