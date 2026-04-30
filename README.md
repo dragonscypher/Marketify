@@ -68,11 +68,18 @@ If the path is not this repo's `.venv\Scripts\python.exe`, stop and switch inter
 ## Detect GPU
 
 ```powershell
+nvidia-smi
 .\.venv\Scripts\python.exe -c "import torch; print(torch.cuda.is_available()); print(torch.cuda.get_device_name(0) if torch.cuda.is_available() else 'NO_GPU')"
 .\.venv\Scripts\python.exe -c "import xgboost as xgb; print(xgb.__version__)"
 ```
 
-If CUDA is unavailable, skip optional heavy retraining. Validation, UI proof, broker skip-proof, and report hygiene still run locally.
+If `nvidia-smi` works but PyTorch prints `False` or `NO_GPU`, the local virtual environment has CPU-only PyTorch. Install a CUDA PyTorch wheel that matches your driver before any GPU benchmark run. For the verified Windows CUDA 12.8 path:
+
+```powershell
+.\.venv\Scripts\python.exe -m pip install --upgrade --force-reinstall torch --index-url https://download.pytorch.org/whl/cu128
+```
+
+Then rerun the PyTorch check. Continue only when PyTorch sees the GPU, or when `nvidia-smi` confirms no usable NVIDIA GPU exists. If CUDA is unavailable, skip optional heavy retraining. Validation, UI proof, broker skip-proof, and report hygiene still run locally.
 
 ## Low-RAM local mode
 
@@ -197,6 +204,7 @@ Run same-path benchmark comparison:
 
 ```powershell
 $env:LOCAL_LOW_RAM_MODE = "1"
+$env:LOCAL_FORCE_GPU = "1"  # only after torch.cuda.is_available() is True
 .\.venv\Scripts\python.exe scripts/compare_models.py --low-ram
 ```
 

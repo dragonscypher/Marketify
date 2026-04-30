@@ -570,6 +570,18 @@ def _write_broker_validation(broker_check: dict[str, Any]) -> tuple[Path, Path]:
     return csv_path, md_path
 
 
+def _read_report_value(path: Path, key: str, default: str = "MISSING") -> str:
+    if not path.exists():
+        return default
+    prefixes = (f"{key}:", f"- {key}:")
+    for line in path.read_text(encoding="utf-8", errors="ignore").splitlines():
+        stripped = line.strip()
+        for prefix in prefixes:
+            if stripped.startswith(prefix):
+                return stripped.split(":", 1)[1].strip()
+    return default
+
+
 def save_reports(report: dict[str, Any]) -> tuple[Path, Path]:
     _ensure_dir(REPORTS_DIR)
     json_path = REPORTS_DIR / "validation_summary.json"
@@ -603,6 +615,11 @@ def save_reports(report: dict[str, Any]) -> tuple[Path, Path]:
         lines.append(f"| {item['name']} | {status} | {item.get('skipped', False)} | {reason} |")
 
     lines += ["", "## Honest Notes"]
+    ui_visual_path = REPORTS_DIR / "ui_visual_proof.md"
+    real_browser_click_proof = _read_report_value(ui_visual_path, "REAL_BROWSER_CLICK_PROOF", "NO")
+    if real_browser_click_proof == "YES":
+        real_browser_reason = _read_report_value(ui_visual_path, "REAL_BROWSER_CLICK_PROOF_REASON", "prior proof retained")
+        lines.append(f"- real_browser_click_proof: YES ({real_browser_reason})")
     for item in report["results"]:
         if item["name"] == "automatic_benchmark_checker":
             lines.append(f"- weekly_benchmark: {item.get('weekly_benchmark')}")

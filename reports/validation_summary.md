@@ -1,6 +1,6 @@
 # Marketify Validation Summary
 
-timestamp: 2026-04-30T00:47:13.747566+00:00
+timestamp: 2026-04-30T01:12:33.101601+00:00
 validation_result: PASS
 paper_only_default: YES
 live_trading_enabled: NO
@@ -24,8 +24,8 @@ IBKR_READ_ONLY_PROVEN: SKIP
 | broker_readiness | PASS_WITH_SKIPS | False | none |
 
 ## Honest Notes
+- real_browser_click_proof: YES (previous real browser DOM/click proof retained; current local runtime readiness rerun was scripted only)
 - ui_flow: {'internal_paper': {'risk_disclaimer_visible': True, 'generate_trade_idea': True, 'reject_no_order_no_fill': True, 'approve_paper_fill': True, 'positions_update': True, 'pnl_updates': True, 'restart_reload': True, 'reset_requires_confirmation': True, 'reset_paper_account': True}, 'mock_http': {'risk_disclaimer_visible': True, 'generate_trade_idea': True, 'reject_no_order_no_fill': True, 'approve_paper_fill': True, 'positions_update': True, 'pnl_updates': True, 'restart_reload': True, 'reset_requires_confirmation': True, 'reset_paper_account': True}, 'approve_paper_fill': True, 'restart_sqlite_reload': True, 'mock_api_reload': True}
-- real_browser_click_proof: YES (prior DOM/click proof retained in reports/ui_visual_proof.md; current local runtime readiness rerun was scripted only)
 - weekly_benchmark: PASS
 - daily_stress_benchmark: FAIL
 - exact_blocker: daily_return_pct below 1.0

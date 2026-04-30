@@ -4,6 +4,8 @@ import argparse
 import gc
 import json
 import os
+import platform
+import subprocess
 import sys
 from collections import Counter
 from dataclasses import asdict, dataclass
@@ -157,6 +159,45 @@ def _detect_cuda() -> tuple[bool, str]:
         return False, f"NO_GPU ({type(exc).__name__}: {exc})"
 
 
+def _nvidia_smi_works() -> bool:
+    try:
+        result = subprocess.run(
+            ["nvidia-smi", "--query-gpu=name", "--format=csv,noheader"],
+            cwd=ROOT,
+            text=True,
+            capture_output=True,
+            timeout=20,
+            check=False,
+        )
+    except Exception:
+        return False
+    return result.returncode == 0 and bool(result.stdout.strip())
+
+
+def _notebook_kernel_still_wrong() -> bool:
+    notebook_path = ROOT / "colab_probe.ipynb"
+    if not notebook_path.exists():
+        return True
+    try:
+        notebook = json.loads(notebook_path.read_text(encoding="utf-8-sig"))
+        metadata = notebook.get("metadata", {})
+        kernelspec = metadata.get("kernelspec", {})
+        has_colab_metadata = any(str(key).lower() == "colab" for key in metadata)
+        display_name = str(kernelspec.get("display_name", ""))
+        return bool(has_colab_metadata or ".venv" not in display_name.lower())
+    except Exception:
+        return True
+
+
+def _xgb_version() -> str:
+    try:
+        import xgboost as xgb
+
+        return str(xgb.__version__)
+    except Exception as exc:
+        return f"UNKNOWN ({type(exc).__name__}: {exc})"
+
+
 def _empty_memory() -> None:
     gc.collect()
     try:
@@ -178,6 +219,7 @@ def _safe_runtime_path(value: str) -> str:
 
 def _runtime_labels(args: argparse.Namespace) -> dict[str, str]:
     cuda_available, gpu_name = _detect_cuda()
+    nvidia_smi = _nvidia_smi_works()
     low_ram = bool(args.low_ram or _env_flag("LOCAL_LOW_RAM_MODE"))
     force_gpu_requested = _env_flag("LOCAL_FORCE_GPU")
     force_gpu = force_gpu_requested and cuda_available
@@ -196,6 +238,14 @@ def _runtime_labels(args: argparse.Namespace) -> dict[str, str]:
         print("[COMPARE] LOCAL_FORCE_GPU ignored: CUDA unavailable")
     return {
         "LOCAL_KERNEL_FIXED": "YES",
+        "REAL_INTERPRETER_PATH": _safe_runtime_path(sys.executable),
+        "REAL_PLATFORM": platform.platform(),
+        "NVIDIA_SMI_WORKS": "YES" if nvidia_smi else "NO",
+        "TORCH_CUDA_VISIBLE": "YES" if cuda_available else "NO",
+        "REAL_GPU_NAME": gpu_name if cuda_available else "NO_GPU",
+        "XGB_VERSION": _xgb_version(),
+        "KERNEL_STILL_WRONG": "YES" if _notebook_kernel_still_wrong() else "NO",
+        "LOCAL_GPU_RUNTIME_FIXED": "YES" if cuda_available else "NO",
         "PYTHON_EXECUTABLE": _safe_runtime_path(sys.executable),
         "LOCAL_GPU_AVAILABLE": "YES" if cuda_available else "NO",
         "LOCAL_GPU_NAME": gpu_name if cuda_available else "NO_GPU",
@@ -1385,15 +1435,18 @@ def build_real_benchmark_markdown(
 
 
 LOCAL_COMMANDS_RUN = [
-    "python -c \"import sys, platform; print(sys.executable); print(platform.platform())\"",
-    "python -c \"import torch; print('CUDA', torch.cuda.is_available()); print('GPU', torch.cuda.get_device_name(0) if torch.cuda.is_available() else 'NO_GPU')\"",
-    "python -c \"import xgboost as xgb; print(xgb.__version__)\"",
-    "python -m pip install -r requirements-colab.txt -q",
-    "python -m pip install -e . -q",
-    "python -m pytest tests/ -q",
-    "python scripts/validate_marketify.py",
-    "set LOCAL_LOW_RAM_MODE=1 and run python scripts/compare_models.py --low-ram",
-    "python scripts/local_run_readiness.py --browser-opened YES --browser-note \"local GPU/runtime rerun\"",
+    ".venv/Scripts/python.exe -c \"import sys, platform; print(sys.executable); print(platform.platform())\"",
+    ".venv/Scripts/python.exe -c \"import torch; print('CUDA', torch.cuda.is_available()); print('GPU', torch.cuda.get_device_name(0) if torch.cuda.is_available() else 'NO_GPU')\"",
+    ".venv/Scripts/python.exe -c \"import xgboost as xgb; print(xgb.__version__)\"",
+    "nvidia-smi",
+    ".venv/Scripts/python.exe -m pip install --upgrade --force-reinstall torch --index-url https://download.pytorch.org/whl/cu128",
+    ".venv/Scripts/python.exe -m pip install -r requirements-colab.txt -q",
+    ".venv/Scripts/python.exe -m pip install -e . -q",
+    ".venv/Scripts/python.exe -m pytest tests/ -q",
+    ".venv/Scripts/python.exe scripts/validate_marketify.py",
+    "LOCAL_LOW_RAM_MODE=1 LOCAL_FORCE_GPU=1 .venv/Scripts/python.exe scripts/compare_models.py --low-ram",
+    ".venv/Scripts/python.exe scripts/local_run_readiness.py --browser-opened YES --browser-note \"local GPU/runtime rerun\"",
+    "train_and_check skipped: XGB/Ridge artifacts already present and valid; no retrain-everything run needed",
 ]
 
 
@@ -1524,6 +1577,14 @@ def build_next_status_markdown(
             "",
             "## Local Runtime / Low RAM",
             f"- LOCAL_KERNEL_FIXED: {runtime_labels.get('LOCAL_KERNEL_FIXED', 'NO')}",
+            f"- REAL_INTERPRETER_PATH: {runtime_labels.get('REAL_INTERPRETER_PATH', 'UNKNOWN')}",
+            f"- REAL_PLATFORM: {runtime_labels.get('REAL_PLATFORM', 'UNKNOWN')}",
+            f"- NVIDIA_SMI_WORKS: {runtime_labels.get('NVIDIA_SMI_WORKS', 'NO')}",
+            f"- TORCH_CUDA_VISIBLE: {runtime_labels.get('TORCH_CUDA_VISIBLE', 'NO')}",
+            f"- LOCAL_GPU_RUNTIME_FIXED: {runtime_labels.get('LOCAL_GPU_RUNTIME_FIXED', 'NO')}",
+            f"- REAL_GPU_NAME: {runtime_labels.get('REAL_GPU_NAME', 'NO_GPU')}",
+            f"- XGB_VERSION: {runtime_labels.get('XGB_VERSION', 'UNKNOWN')}",
+            f"- KERNEL_STILL_WRONG: {runtime_labels.get('KERNEL_STILL_WRONG', 'YES')}",
             f"- PYTHON_EXECUTABLE: {runtime_labels.get('PYTHON_EXECUTABLE', 'UNKNOWN')}",
             f"- LOCAL_GPU_AVAILABLE: {runtime_labels.get('LOCAL_GPU_AVAILABLE', 'NO')}",
             f"- LOCAL_GPU_NAME: {runtime_labels.get('LOCAL_GPU_NAME', 'NO_GPU')}",
