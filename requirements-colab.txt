@@ -2,7 +2,7 @@
 -r requirements.txt
 
 torch>=2.3.1
-chronos-forecasting>=1.2.0
+chronos-forecasting>=2.2.2
 transformers>=4.57.6,<5  # CVE-2026-1839 fixed in 5.x but chronos-forecasting<3 requires <5; upgrade when chronos drops the cap
 tokenizers>=0.22.0
 huggingface-hub>=0.33.5,<2.0
