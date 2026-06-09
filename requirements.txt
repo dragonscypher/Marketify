@@ -1,7 +1,7 @@
 # Core / local deps — light enough for any dev machine
 gradio>=4.44.0
 yfinance>=0.2.40
-pandas>=2.2.2
+pandas>=2.3.3
 pyarrow>=15.0.0
 numpy>=1.26.4
 xgboost>=2.1.1
