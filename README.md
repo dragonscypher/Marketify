@@ -36,9 +36,11 @@ This project is experimental. It is not financial advice. Trading can lose money
 ```powershell
 py -3.12 -m venv .venv
 .\.venv\Scripts\python.exe -m pip install --upgrade pip
-.\.venv\Scripts\python.exe -m pip install -r requirements-colab.txt -q
+.\.venv\Scripts\python.exe -m pip install -r requirements.txt -q
 .\.venv\Scripts\python.exe -m pip install -e . -q
 ```
+
+Use `requirements-colab.txt` only in Colab/GPU environments. It installs heavy ML packages such as PyTorch, Chronos, and Transformers that are not needed for normal local UI use.
 
 If the virtual environment is broken, use the repair script:
 

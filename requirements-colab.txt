@@ -3,6 +3,6 @@
 
 torch>=2.3.1
 chronos-forecasting>=1.2.0
-transformers>=4.40.0
-tokenizers>=0.19.0
-huggingface-hub>=0.33.5,<1.0
+transformers>=4.57.6,<5  # CVE-2026-1839 fixed in 5.x but chronos-forecasting<3 requires <5; upgrade when chronos drops the cap
+tokenizers>=0.22.0
+huggingface-hub>=0.33.5,<2.0

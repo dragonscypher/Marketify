@@ -42,7 +42,7 @@ def _download_cached(ticker: str, interval: str, period: str, prepost: bool) -> 
         prepost=prepost,
         auto_adjust=False,
         progress=False,
-        threads=True,
+        threads=False,
     )
     return _normalize_download(df)
 

@@ -39,9 +39,17 @@ def _resolve_artifact_ref(path_value: Any) -> Path | None:
     raw_path = Path(path_value.strip())
     parts = list(raw_path.parts)
     if "artifacts" in parts:
-        raw_path = Path(*parts[parts.index("artifacts"):])
-    if raw_path.is_absolute():
-        return raw_path
+        raw_path = ARTIFACT_DIR / Path(*parts[parts.index("artifacts") + 1:])
+    elif raw_path.is_absolute():
+        return None
+    else:
+        raw_path = ARTIFACT_DIR / raw_path
+
+    artifact_root = ARTIFACT_DIR.resolve()
+    try:
+        raw_path.resolve().relative_to(artifact_root)
+    except ValueError:
+        return None
     return raw_path
 
 
@@ -762,9 +770,22 @@ with gr.Blocks(title="Marketify Paper Engine") as demo:
             )
 
             timer.tick(
-                generate_trade_suggestion,
-                inputs=[app_state, ticker, interval, period, prepost],
-                outputs=[app_state, status, suggestion, account, positions, orders],
+                refresh_dashboard,
+                inputs=[app_state],
+                outputs=[
+                    app_state,
+                    suggestion,
+                    account,
+                    positions,
+                    orders,
+                    fills,
+                    pnl_summary,
+                    risk_events,
+                    model_leaderboard,
+                    benchmark_status,
+                    local_model_status,
+                    safety_status,
+                ],
             )
 
             approve_btn.click(

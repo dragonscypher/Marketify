@@ -40,6 +40,28 @@ def test_app_latest_artifact_pointer_discovery(monkeypatch, tmp_path):
     assert app._find_latest_artifact("AAPL", "xgb") == Path("artifacts/training_runs/20260426T000000Z_test/xgb_AAPL.pkl")
 
 
+def test_app_latest_artifact_rejects_out_of_tree_pointer(monkeypatch, tmp_path):
+    import app
+
+    artifact_dir = tmp_path / "artifacts"
+    report_dir = tmp_path / "reports"
+    artifact_dir.mkdir()
+    report_dir.mkdir()
+    outside_path = tmp_path / "outside.pkl"
+    outside_path.write_bytes(b"not-a-real-pickle")
+    pointer = {
+        "latest_xgb_artifact_path": str(outside_path),
+        "models": {"xgb": {"artifact_path": "../outside.pkl"}},
+    }
+    (artifact_dir / "latest_AAPL.json").write_text(json.dumps(pointer), encoding="utf-8")
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(app, "ARTIFACT_DIR", Path("artifacts"))
+    monkeypatch.setattr(app, "REPORTS_DIR", Path("reports"))
+
+    assert app._find_latest_artifact("AAPL", "xgb") is None
+
+
 def test_app_latest_scalar_handles_multiindex_close():
     import pandas as pd
     import app
